@@ -452,6 +452,7 @@ describe("herdr adapter — socket ping probe + workspace.create → layout.appl
         requests.push({ method, params });
         if (opts?.respond) return opts.respond(method, params);
         if (method === "workspace.create") return { type: "workspace_created", workspace_id: "wG" };
+        if (method === "pane.list") return { type: "pane_list", panes: [{ pane_id: "wG:p1", tab_id: "wG:t2", label: "pod.a · s02" }] };
         return { type: "layout_apply", layout: { workspace_id: "wG", tab_id: "wG:t2" } };
       },
     };
@@ -545,8 +546,9 @@ describe("herdr adapter — socket ping probe + workspace.create → layout.appl
     });
     const adapter = new HerdrAdapter({ transportFactory: () => transport, newLaunchToken: () => "t" });
     const res = await adapter.openView(view);
-    expect(res.ok).toBe(true);
-    expect(res.opened).toEqual(["a@r"]);
+    expect(res.ok).toBe(false);
+    expect(res.opened).toEqual([]);
+    expect(res.degraded[0]?.reason).toContain("unconfirmed");
     // OPR.0.6.0.8: before the bare fallback it checks for a same-named workspace (none here).
     expect(requests.map((r) => r.method)).toEqual(["workspace.list", "workspace.create", "workspace.list", "workspace.create", "layout.apply"]);
     expect((requests[4]!.params as Record<string, unknown>)["workspace_id"]).toBe("wH");
@@ -584,10 +586,11 @@ describe("herdr adapter — socket ping probe + workspace.create → layout.appl
     const { transport } = fakeSocketTransport({
       respond: async (method) => {
         if (method === "workspace.create") return { type: "workspace_created", workspace_id: "wG" };
+        if (method === "pane.list") return { type: "pane_list", panes: [{ pane_id: "wG:p1", tab_id: "wG:t2", label: "pod.a · s02" }] };
         if (method !== "layout.apply") return { type: "ok" };
         applies += 1;
         if (applies === 2) throw new Error("herdr error: bad tree");
-        return { type: "layout_apply" };
+        return { type: "layout_apply", layout: { workspace_id: "wG", tab_id: "wG:t2" } };
       },
     });
     const adapter = new HerdrAdapter({ transportFactory: () => transport });
