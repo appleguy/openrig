@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import { Hono } from "hono";
 import { readTaskTerminalView, resolveLocalTaskSeat, type TaskSeat } from "../src/domain/terminal/task-terminal-view.js";
@@ -121,5 +121,67 @@ describe("task terminal membership", () => {
     const result = await (await send(preview.planId)).json(); expect(result.viewDescriptor).toEqual(preview.viewDescriptor); expect(result.task).toEqual(preview.task); expect(opened).toEqual([["a@team"]]);
     add("qitem-join", "c@team", "pending", "qitem-root");
     expect((await send(preview.planId)).status).toBe(409); expect(opened).toHaveLength(1);
+  });
+  it("never attaches a latest session through its predecessor's binding", () => {
+    const { db, add } = fixture(); add("qitem-root", "dev-worker@team");
+    db.exec(`INSERT INTO rigs VALUES('rig','team',NULL);
+      INSERT INTO nodes VALUES('worker','rig','dev.worker','stub');
+      INSERT INTO sessions VALUES('01','worker','old-worker@team','superseded'),('02','worker','new-worker@team','running');
+      INSERT INTO bindings VALUES('worker','old-worker@team','tmux');`);
+    const read = () => readTaskTerminalView(db, "qitem-root", address => resolveLocalTaskSeat(db, address, "box"))!;
+    expect(read().task.members[0]).toMatchObject({ key: { nodeId: "worker" }, seat: "new-worker@team", availability: "missing" });
+    expect(read().members).toEqual([]);
+    // A fresh matching binding restores attachment; a currentNodeId cannot bypass the same join.
+    expect(resolveLocalTaskSeat(db, "dev-worker@team", "box", "worker")!.tmuxSession).toBeNull();
+    db.prepare("UPDATE bindings SET tmux_session='new-worker@team'").run();
+    expect(read().members[0]!.tmuxSession).toBe("new-worker@team");
+  });
+  it("caps actual lineage rows even when unrelated history hides an episode beyond the scan", () => {
+    const { db, add, read } = fixture(); add("qitem-root");
+    db.transaction(() => {
+      for (let i = 0; i < 50002; i++) add(`qitem-noise-${i}`, "unrelated@team", "done");
+      add("qitem-z-descendant", "unseen@team", "pending", "qitem-root");
+    })();
+    let scanned = 0, projection = "";
+    const prepare = db.prepare.bind(db);
+    vi.spyOn(db, "prepare").mockImplementation(sql => {
+      const statement = prepare(sql);
+      if (sql.includes("/* task-lineage */")) {
+        projection = sql;
+        const iterate = statement.iterate.bind(statement);
+        vi.spyOn(statement, "iterate").mockImplementation(function* (...params: unknown[]) {
+          for (const row of iterate(...params)) { scanned++; yield row; }
+        });
+      }
+      return statement;
+    });
+    const result = read()!;
+    expect(result.task.complete).toBe(false);
+    expect(result.task.issues.join(" ")).toContain("50000-row work limit");
+    expect(scanned).toBe(50001); // Includes the one overflow sentinel, never the remaining history.
+    expect(result.task.members.map(member => member.seat)).toEqual(["a@team"]);
+    const plan = prepare(`EXPLAIN QUERY PLAN ${projection}`).all(50001) as Array<{ detail: string }>;
+    expect(plan.some(row => row.detail.includes("USING INDEX"))).toBe(true);
+    expect(plan.some(row => row.detail.includes("TEMP B-TREE"))).toBe(false);
+    console.info("task lineage work", JSON.stringify({ storedRows: 50004, scannedRows: scanned, complete: result.task.complete, plan: plan.map(row => row.detail) }));
+  }, 20000);
+  it("does not parse an oversized lineage record or report a complete team", () => {
+    const { add, read } = fixture(); add("qitem-root");
+    add("qitem-big", "b@team", "pending", null, ["qitem-root", "x".repeat(20000)]);
+    const result = read()!;
+    expect(result.task.complete).toBe(false);
+    expect(result.task.issues.join(" ")).toContain("per-record work limit");
+    expect(result.task.members.map(member => member.seat)).toEqual(["a@team"]);
+  });
+  it("caps total encoded lineage bytes and links independently of the episode size", () => {
+    const bytes = fixture(); bytes.add("qitem-root");
+    bytes.db.transaction(() => { for (let i = 0; i < 530; i++) bytes.add(`qitem-blob-${i}`, "other@team", "done", null, ["x".repeat(16000)]); })();
+    expect(bytes.read()!.task.complete).toBe(false);
+    expect(bytes.read()!.task.issues.join(" ")).toContain("encoded-byte work limit");
+    const links = fixture(); links.add("qitem-root");
+    const chain = Array.from({ length: 500 }, (_, i) => `qitem-other-${i}`);
+    links.db.transaction(() => { for (let i = 0; i < 210; i++) links.add(`qitem-link-${i}`, "other@team", "done", null, chain); })();
+    expect(links.read()!.task.complete).toBe(false);
+    expect(links.read()!.task.issues.join(" ")).toContain("link work limit");
   });
 });

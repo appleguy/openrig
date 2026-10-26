@@ -35,34 +35,66 @@ interface EpisodeRow {
 }
 const ACTIVE = new Set(["pending", "in-progress", "blocked"]);
 const MAX_EPISODE_ROWS = 256;
+const MAX_LINEAGE_ROWS = 50000;
+const MAX_CHAIN_BYTES = 16384;
+const MAX_LINEAGE_BYTES = 8 * 1024 * 1024;
+const MAX_LINEAGE_LINKS = 100000;
+const CHAIN_BYTES = "coalesce(length(CAST(chain_of_record AS BLOB)),0)";
+const BOUNDED_CHAIN = `CASE WHEN ${CHAIN_BYTES}<=${MAX_CHAIN_BYTES} THEN chain_of_record ELSE 'null' END AS chain_of_record`;
 
-/** Read only this local episode, never an unbounded latest-items projection.
- * UNION makes a corrupt cyclic link terminate; the bound is disclosed, not
- * mistaken for a complete team. No ancestor/sibling expansion or foreign I/O.
+/** One bounded local lineage projection, then in-memory child expansion.
+ * The row, encoded-byte and link budgets bound work on unrelated history as
+ * well as the returned episode. Reaching any budget means incomplete, never
+ * an empty/complete team. No ancestor/sibling expansion or foreign I/O.
  */
 export function readTaskTerminalView(
   db: Database.Database,
   qitemId: string,
   resolveSeat: (address: string) => TaskSeat | null,
 ): TaskTerminalView | null {
-  const rows = db.prepare(`WITH RECURSIVE episode(id) AS (
-    SELECT qitem_id FROM queue_items WHERE qitem_id = ?
-    UNION
-    SELECT q.qitem_id FROM queue_items q JOIN episode e ON
-      q.handed_off_from = e.id OR EXISTS (
-        SELECT 1 FROM json_each(CASE WHEN json_valid(q.chain_of_record) THEN
-          CASE WHEN json_type(q.chain_of_record)='array' THEN q.chain_of_record ELSE '[]' END ELSE '[]' END) c WHERE c.value = e.id
-      )
-    LIMIT ?
-  ) SELECT q.qitem_id, q.summary, q.destination_session, q.state, q.handed_off_from, q.chain_of_record
-    FROM queue_items q JOIN episode e ON e.id=q.qitem_id ORDER BY q.qitem_id`)
-    .all(qitemId, MAX_EPISODE_ROWS + 1) as EpisodeRow[];
-  if (!rows.some(row => row.qitem_id === qitemId)) return null;
+  return db.transaction(() => readTaskTerminalSnapshot(db, qitemId, resolveSeat))();
+}
+
+function readTaskTerminalSnapshot(
+  db: Database.Database, qitemId: string, resolveSeat: (address: string) => TaskSeat | null,
+): TaskTerminalView | null {
+  const load = db.prepare(`SELECT qitem_id,summary,destination_session,state,handed_off_from,${BOUNDED_CHAIN}
+    FROM queue_items WHERE qitem_id=?`);
+  const root = load.get(qitemId) as EpisodeRow | undefined;
+  if (!root) return null;
   const issues: string[] = [];
-  if (rows.length > MAX_EPISODE_ROWS) issues.push(`Episode exceeds ${MAX_EPISODE_ROWS} local rows; membership is incomplete.`);
-  // Keep the requested root even when the recursive bound was reached.
-  const selected = [rows.find(row => row.qitem_id === qitemId)!, ...rows.filter(row => row.qitem_id !== qitemId)]
-    .slice(0, MAX_EPISODE_ROWS);
+  const scanIssues = new Set<string>();
+  const knownIds = new Set([qitemId]);
+  const children = new Map<string, string[]>();
+  let scanned = 0, bytes = 0, links = 0;
+  const lineage = db.prepare(`/* task-lineage */ SELECT qitem_id,handed_off_from,${BOUNDED_CHAIN},
+    ${CHAIN_BYTES} AS chain_bytes FROM queue_items ORDER BY qitem_id LIMIT ?`);
+  scan: for (const value of lineage.iterate(MAX_LINEAGE_ROWS + 1)) {
+    if (scanned++ === MAX_LINEAGE_ROWS) { scanIssues.add(`Lineage scan reached its ${MAX_LINEAGE_ROWS}-row work limit; membership is incomplete.`); break; }
+    const row = value as Pick<EpisodeRow, "qitem_id" | "handed_off_from" | "chain_of_record"> & { chain_bytes: number };
+    knownIds.add(row.qitem_id);
+    if (bytes + row.chain_bytes > MAX_LINEAGE_BYTES) { scanIssues.add("Lineage scan reached its encoded-byte work limit; membership is incomplete."); break; }
+    bytes += row.chain_bytes;
+    let chain: unknown = [];
+    try { chain = JSON.parse(row.chain_of_record ?? "[]"); } catch { chain = null; }
+    if (!Array.isArray(chain)) { scanIssues.add("Some local lineage could not be read within its per-record work limit; membership is incomplete."); chain = []; }
+    const refs = new Set([row.handed_off_from, ...(chain as unknown[]).filter((id): id is string => typeof id === "string" && id.startsWith("qitem-"))]);
+    for (const parent of refs) {
+      if (!parent) continue;
+      if (++links > MAX_LINEAGE_LINKS) { scanIssues.add("Lineage scan reached its link work limit; membership is incomplete."); break scan; }
+      const list = children.get(parent) ?? []; list.push(row.qitem_id); children.set(parent, list);
+    }
+  }
+  issues.push(...scanIssues);
+  const episode = [qitemId], seen = new Set(episode);
+  expand: for (const parent of episode) {
+    for (const child of children.get(parent) ?? []) {
+      if (seen.has(child)) continue;
+      if (episode.length === MAX_EPISODE_ROWS) { issues.push(`Episode exceeds ${MAX_EPISODE_ROWS} local rows; membership is incomplete.`); break expand; }
+      seen.add(child); episode.push(child);
+    }
+  }
+  const selected = episode.map(id => id === qitemId ? root : load.get(id) as EpisodeRow);
   const ids = new Set(selected.map(row => row.qitem_id));
   const parents = new Map<string, string[]>();
   for (const row of selected) {
@@ -78,7 +110,8 @@ export function readTaskTerminalView(
     // The root's own ancestry is deliberately outside this view.
     if (row.qitem_id !== qitemId) {
       for (const ref of refs) {
-        if (!ids.has(ref) && !db.prepare("SELECT 1 FROM queue_items WHERE qitem_id=?").get(ref)) {
+        if (!knownIds.has(ref)) {
+          if (scanIssues.size) continue; // Already incomplete; an unscanned row is not proven absent.
           issues.push(`Lineage ${ref} referenced by ${row.qitem_id} is not available locally.`);
         }
       }
@@ -139,6 +172,7 @@ export function resolveLocalTaskSeat(
     FROM nodes n JOIN rigs r ON r.id=n.rig_id
     LEFT JOIN sessions s ON s.id=(SELECT id FROM sessions WHERE node_id=n.id ORDER BY id DESC LIMIT 1)
     LEFT JOIN bindings b ON b.node_id=n.id
+      AND (b.attachment_type='external_cli' OR b.tmux_session=s.session_name)
     WHERE r.archived_at IS NULL AND (n.id=? OR
       (? IS NULL AND (s.session_name=? OR replace(n.logical_id, '.', '-') || '@' || r.name=?)))`)
     .all(currentNodeId ?? null, currentNodeId ?? null, address, address) as Array<{

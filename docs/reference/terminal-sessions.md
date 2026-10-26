@@ -156,12 +156,18 @@ GET /api/terminal/preview?view=qitem:<id>&provider=herdr
 POST /api/terminal/open {"view":"qitem:<id>","provider":"herdr","expectedPlan":"<preview planId>"}
 ```
 
-Preview and open include `task: {qitemId, complete, issues, members}`. Each member
+Preview and open include `task: {qitemId, name, complete, issues, members}`. Each member
 names its structured `{hostId, nodeId}` key (null when unresolved), seat,
 contributing `obligations`, `availability` and `viewerStatus`. Stopped, missing,
 external and unresolved remote owners remain visible. Remote queues are not
 crawled and no remote tmux socket is guessed. A bounded or damaged lineage is
 explicitly incomplete; it is never silently presented as the whole team.
+
+The local lineage read has work limits: 50,000 scanned rows (plus one overflow
+sentinel), 8 MiB of encoded lineage, 100,000 links, and 16 KiB per chain record.
+It reads one snapshot and expands only the requested episode, up to 256 rows.
+Hitting a work limit preserves known members and reports incomplete membership;
+it does not claim that an owner outside the scanned history is absent.
 
 Preview and open also include `viewDescriptor: {kind, name}`: `following` for
 derived views and `fixed` for a saved layout. A task uses its row summary as
