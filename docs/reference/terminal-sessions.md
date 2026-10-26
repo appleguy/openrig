@@ -139,3 +139,31 @@ session keeps the normal HTTP 200 provider result with `ok: false`, its selected
 `session`, an error code and direct-attach guidance.
 The `kernel_seats_unavailable` result also keeps the selected session, so the CLI
 reports that known failure instead of replacing it with an unconfirmed-session error.
+
+## Task terminal views
+
+`rig terminal open qitem:<id> --provider herdr --json` opens a derived, read-only
+view of the current owners of a local queue episode. The episode includes the
+requested row and explicitly linked descendants; only pending, in-progress and
+blocked obligations contribute owners. It does not include historical senders,
+closed predecessors, parent episodes or siblings. Membership is not input
+permission.
+
+The existing daemon endpoints accept the same view:
+
+```text
+GET /api/terminal/preview?view=qitem:<id>&provider=herdr
+POST /api/terminal/open {"view":"qitem:<id>","provider":"herdr","expectedPlan":"<preview planId>"}
+```
+
+Preview and open include `task: {qitemId, complete, issues, members}`. Each member
+names its structured `{hostId, nodeId}` key (null when unresolved), seat,
+contributing `obligations`, `availability` and `viewerStatus`. Stopped, missing,
+external and unresolved remote owners remain visible. Remote queues are not
+crawled and no remote tmux socket is guessed. A bounded or damaged lineage is
+explicitly incomplete; it is never silently presented as the whole team.
+
+Preview is read-only. In this membership increment, `viewerStatus` is
+`not-provisioned`: the response does not verify a reusable provider terminal
+mapping. An explicit open retains the provider's existing workspace behavior;
+it does not continuously reconcile the view or change an agent's lifecycle.

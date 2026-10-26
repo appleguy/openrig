@@ -1,3 +1,4 @@
+import type { TaskMembership } from "./task-terminal-view.js";
 // OPR.0.4.6.02 C2 — the TerminalProvider abstraction (the CORE seam of the
 // terminal-provider ride).
 //
@@ -60,6 +61,7 @@ export interface DegradedSeat {
  */
 export interface ComposedView {
   id: string;
+  task?: TaskMembership;
   /** Service-provided preview fingerprint, attached after composition for provider labels. */
   planId?: string;
   opened: ComposedPane[];
@@ -101,6 +103,7 @@ export interface ProviderLiveness {
  */
 export interface OpenViewResult {
   provider: string;
+  task?: TaskMembership;
   /** Explicitly selected provider session, when the request names one. */
   session?: string;
   ok: boolean;
