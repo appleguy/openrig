@@ -163,6 +163,12 @@ external and unresolved remote owners remain visible. Remote queues are not
 crawled and no remote tmux socket is guessed. A bounded or damaged lineage is
 explicitly incomplete; it is never silently presented as the whole team.
 
+Preview and open also include `viewDescriptor: {kind, name}`: `following` for
+derived views and `fixed` for a saved layout. A task uses its row summary as
+its name, falling back to the qitem ID. The existing preview `view` string is
+unchanged. A following view derives membership when requested; it does not
+mean an open workspace updates itself.
+
 Preview is read-only. In this membership increment, `viewerStatus` is
 `not-provisioned`: the response does not verify a reusable provider terminal
 mapping. An explicit open retains the provider's existing workspace behavior;

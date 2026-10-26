@@ -9,13 +9,13 @@ const dbs: Database.Database[] = [];
 afterEach(() => { for (const db of dbs.splice(0)) db.close(); });
 function fixture() {
   const db = new Database(":memory:"); dbs.push(db);
-  db.exec(`CREATE TABLE queue_items (qitem_id TEXT PRIMARY KEY,destination_session TEXT,state TEXT,handed_off_from TEXT,chain_of_record TEXT);
+  db.exec(`CREATE TABLE queue_items (qitem_id TEXT PRIMARY KEY,destination_session TEXT,state TEXT,handed_off_from TEXT,chain_of_record TEXT,summary TEXT);
     CREATE TABLE rigs(id TEXT PRIMARY KEY,name TEXT,archived_at TEXT);
     CREATE TABLE nodes(id TEXT PRIMARY KEY,rig_id TEXT,logical_id TEXT,runtime TEXT);
     CREATE TABLE sessions(id TEXT PRIMARY KEY,node_id TEXT,session_name TEXT,status TEXT);
     CREATE TABLE bindings(node_id TEXT,tmux_session TEXT,attachment_type TEXT);`);
   const add = (id: string, owner = "a@team", state = "in-progress", parent: string | null = null, chain: string[] = []) =>
-    db.prepare("INSERT INTO queue_items VALUES (?,?,?,?,?)").run(id, owner, state, parent, JSON.stringify(chain));
+    db.prepare("INSERT INTO queue_items(qitem_id,destination_session,state,handed_off_from,chain_of_record) VALUES (?,?,?,?,?)").run(id, owner, state, parent, JSON.stringify(chain));
   const seat = (address: string): TaskSeat | null => address.includes("@remote") ? null
     : { hostId: "box", nodeId: address.split("@")[0]!, seat: address, runtime: "stub", stopped: false, attachmentType: "tmux", tmuxSession: address };
   const read = (root = "qitem-root") => readTaskTerminalView(db, root, seat);
@@ -64,7 +64,10 @@ describe("task terminal membership", () => {
   });
   it("returns a truthful empty completed episode and distinguishes an unknown root", () => {
     const { add, read } = fixture(); add("qitem-root", "old@team", "done");
-    expect(read()!.task).toMatchObject({ complete: true, members: [] }); expect(read("qitem-absent")).toBeNull();
+    expect(read()!.task).toMatchObject({ complete: true, members: [] });
+    const { db } = fixture();
+    db.prepare("INSERT INTO queue_items(qitem_id,summary,state,destination_session) VALUES (?,?,?,?)").run("qitem-named", "Prepare report", "pending", "a@team");
+    expect(readTaskTerminalView(db, "qitem-named", () => null)!.task.name).toBe("Prepare report"); expect(read("qitem-absent")).toBeNull();
   });
   it("does not use a latest-100 window and discloses the explicit episode bound", () => {
     const { add, read } = fixture(); add("qitem-root");
@@ -111,10 +114,11 @@ describe("task terminal membership", () => {
     const response = await app.request("/api/terminal/preview?view=qitem:qitem-root&provider=herdr");
     expect(response.status).toBe(200);
     const preview = await response.json();
+    expect(preview.viewDescriptor).toEqual({ kind: "following", name: "qitem-root" });
     expect(preview.task.members).toHaveLength(2); expect(preview.composed.absent[0].seat).toBe("b@remote"); expect(opened).toHaveLength(0);
     const send = (expectedPlan: string) => app.request("/api/terminal/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ view: "qitem:qitem-root", provider: "herdr", expectedPlan }) });
     expect((await send("stale")).status).toBe(409); expect(opened).toHaveLength(0);
-    const result = await (await send(preview.planId)).json(); expect(result.task).toEqual(preview.task); expect(opened).toEqual([["a@team"]]);
+    const result = await (await send(preview.planId)).json(); expect(result.viewDescriptor).toEqual(preview.viewDescriptor); expect(result.task).toEqual(preview.task); expect(opened).toEqual([["a@team"]]);
     add("qitem-join", "c@team", "pending", "qitem-root");
     expect((await send(preview.planId)).status).toBe(409); expect(opened).toHaveLength(1);
   });

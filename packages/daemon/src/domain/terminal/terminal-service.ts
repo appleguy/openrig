@@ -51,6 +51,7 @@ import type {
   ProviderLiveness,
   ProviderStatus,
   TerminalProvider,
+  ViewDescriptor,
 } from "./terminal-provider.js";
 
 /** The provider name set (herdr = proof-gated primary; cmux = best-effort; rex = by name or from a Rex caller). */
@@ -82,6 +83,7 @@ export interface TerminalPreview {
   grids: ReturnType<typeof buildGridRoot>[];
   status: ProviderStatus;
   task?: TaskMembership;
+  viewDescriptor?: ViewDescriptor;
 }
 
 /** The `rig terminal views` payload: saved views + the live rig names you can open. */
@@ -247,7 +249,7 @@ export class TerminalService {
     if (!composed.kernelLayout && composed.opened.some(pane => !pane.readOnly)) {
       notes.push("The shared dashboard is the overview; the team's lead pane is where you can talk about the work. Check the opened seats and any absent or degraded seats above. Can you see the team? A created workspace or a capture alone does not confirm what is visible on your screen.");
     }
-    return { ...result, ...(composed.task ? { task: composed.task } : {}), ...(session !== undefined ? { session } : {}), ...(notes.length ? { notes: [...notes, ...(result.notes ?? [])] } : {}) };
+    return { ...result, viewDescriptor: composed.viewDescriptor, ...(composed.task ? { task: composed.task } : {}), ...(session !== undefined ? { session } : {}), ...(notes.length ? { notes: [...notes, ...(result.notes ?? [])] } : {}) };
   }
 
   private async resolveComposed(viewArg: string, panesPerPage?: number, viewportColumns?: number): Promise<ComposedTerminalView | { code: string; error: string }> {
@@ -256,6 +258,10 @@ export class TerminalService {
     const resolved = await this.resolveView(view);
     if ("code" in resolved) return resolved;
     const composed = composeView(resolved.id, await this.refineLiveness(resolved.members), { resolveHost: (id) => this.deps.resolveHost(id), panesPerPage: resolved.panesPerPage ?? panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: daemonTmuxServerArgs() });
+    const saved = view.startsWith("saved:") ? this.deps.viewsStore.get(view.slice(6))
+      : !/^(qitem|mission|slice|pod|rig):/.test(view) ? this.deps.viewsStore.get(view) : null;
+    composed.viewDescriptor = { kind: saved && saved.id === resolved.id ? "fixed" : "following",
+      name: resolved.task?.name ?? (saved?.id === resolved.id ? saved.name : resolved.id) };
     if (resolved.task) {
       for (const member of resolved.task.members) {
         const missing = composed.absent.find(item => item.seat === member.seat);
@@ -289,7 +295,7 @@ export class TerminalService {
     const { provider, session } = selected;
     const composed = await this.resolveComposed(req.view, provider.panesPerPage, req.viewportColumns);
     if ("code" in composed) return errorResult(providerName, composed.code, composed.error);
-    return { provider: providerName, ...(session !== undefined ? { session } : {}), view: req.view, composed, ...(composed.task ? { task: composed.task } : {}),
+    return { provider: providerName, ...(session !== undefined ? { session } : {}), view: req.view, composed, viewDescriptor: composed.viewDescriptor, ...(composed.task ? { task: composed.task } : {}),
       grids: composed.pages.map(page => buildGridRoot(page, composed.columns)), planId: this.planId(providerName, composed, session), status: await provider.status() };
   }
 

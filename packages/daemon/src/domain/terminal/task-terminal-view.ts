@@ -14,6 +14,7 @@ export interface TaskTerminalMember {
 }
 export interface TaskMembership {
   qitemId: string;
+  name: string;
   complete: boolean;
   issues: string[];
   members: TaskTerminalMember[];
@@ -29,7 +30,7 @@ export interface TaskSeat {
 }
 export interface TaskTerminalView { task: TaskMembership; members: ViewMemberInput[] }
 interface EpisodeRow {
-  qitem_id: string; destination_session: string; state: string;
+  qitem_id: string; summary: string | null; destination_session: string; state: string;
   handed_off_from: string | null; chain_of_record: string | null;
 }
 const ACTIVE = new Set(["pending", "in-progress", "blocked"]);
@@ -53,7 +54,7 @@ export function readTaskTerminalView(
           CASE WHEN json_type(q.chain_of_record)='array' THEN q.chain_of_record ELSE '[]' END ELSE '[]' END) c WHERE c.value = e.id
       )
     LIMIT ?
-  ) SELECT q.qitem_id, q.destination_session, q.state, q.handed_off_from, q.chain_of_record
+  ) SELECT q.qitem_id, q.summary, q.destination_session, q.state, q.handed_off_from, q.chain_of_record
     FROM queue_items q JOIN episode e ON e.id=q.qitem_id ORDER BY q.qitem_id`)
     .all(qitemId, MAX_EPISODE_ROWS + 1) as EpisodeRow[];
   if (!rows.some(row => row.qitem_id === qitemId)) return null;
@@ -123,7 +124,7 @@ export function readTaskTerminalView(
     });
   }
   const members = [...owners.values()].sort((a, b) => JSON.stringify(a.key).localeCompare(JSON.stringify(b.key)) || a.seat.localeCompare(b.seat));
-  return { task: { qitemId, complete: issues.length === 0, issues: [...new Set(issues)], members }, members: [...inputs.values()] };
+  return { task: { qitemId, name: selected[0]!.summary?.trim() || qitemId, complete: issues.length === 0, issues: [...new Set(issues)], members }, members: [...inputs.values()] };
 }
 
 /** Preserve local stopped/unlaunched owners as well as current registry aliases.
