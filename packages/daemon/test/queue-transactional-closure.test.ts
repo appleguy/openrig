@@ -36,11 +36,12 @@ import { rmSync } from "node:fs";
 interface SendCall {
   session: string;
   text: string;
+  opts?: Parameters<QueueNudgeTransport["send"]>[2];
 }
 
 /** A mock wake transport that records every send and lets a test dictate the
  *  outcome (ok+verified, ok+unverified = the ambiguous face, not-ok, or throw). */
-type SendMode = "verified" | "unverified" | "notok" | "timeout" | "throw" | "throw-timeout";
+type SendMode = "verified" | "unverified" | "notok" | "timeout" | "wait-busy" | "wait-unknown" | "throw" | "throw-timeout";
 function makeMockTransport(): {
   transport: QueueNudgeTransport;
   calls: SendCall[];
@@ -51,8 +52,8 @@ function makeMockTransport(): {
     mode: "verified",
   };
   const transport: QueueNudgeTransport = {
-    async send(session: string, text: string) {
-      calls.push({ session, text });
+    async send(session: string, text: string, opts) {
+      calls.push({ session, text, opts });
       switch (outcome.mode) {
         case "verified":
           return { ok: true, verified: true };
@@ -63,6 +64,10 @@ function makeMockTransport(): {
         case "timeout":
           // A timeout is AMBIGUOUS: the send may or may not have landed.
           return { ok: false, reason: "verify timeout waiting for render ack" };
+        case "wait-busy":
+          return { ok: false, reason: "wait_for_idle_timeout", error: "Target was still busy when the wait ended. No text was sent.", sent: false, inputPhase: "not_reached" };
+        case "wait-unknown":
+          return { ok: false, reason: "target_activity_unknown", error: "Target activity could not be determined when the wait ended. No text was sent.", sent: false, inputPhase: "not_reached" };
         case "throw":
           throw new Error(outcome.error ?? "transport exploded");
         case "throw-timeout":
@@ -401,12 +406,9 @@ describe("W1 transactional closure — W1-c: the seam guard (a terminal close ca
   });
 });
 
-// MF6 (guard HOLD): the LOCK requires a timeout/ambiguous outcome to record
-// `indeterminate`. The prior code classified only ok&&!verified that way; a
-// timeout-shaped non-OK became `failed`, and because recovery drains only
-// `pending`, a `failed` row is never retried despite the prose. Fix: classify a
-// timeout as indeterminate from the typed result; keep the honest retry policy
-// (only `pending` is retried; failed/indeterminate are terminal-visible).
+// Post-input timeouts remain `indeterminate`; an idle-wait expiry with explicit
+// no-input evidence is a definite `failed` attempt. Recovery can retry either
+// state, while a no-write retry cannot resolve an earlier ambiguous delivery.
 describe("W1 MF6 — timeout classifies as indeterminate; retry policy is honest", () => {
   let h: ReturnType<typeof makeHarness>;
   beforeEach(() => { h = makeHarness(); });
@@ -440,6 +442,36 @@ describe("W1 MF6 — timeout classifies as indeterminate; retry policy is honest
     h.outcome.mode = "notok";
     const { created } = await doHandoff();
     expect(h.outbox.getById(`wake-intent-${created.qitemId}`)!.deliveryState).toBe("failed");
+  });
+
+  it.each([
+    ["busy", "wait-busy"],
+    ["unknown", "wait-unknown"],
+  ] as const)("a queue wake that exhausts its idle wait on %s records no-write failure and leaves the qitem pending", async (_label, mode) => {
+    h.outcome.mode = mode;
+    const { created } = await doHandoff();
+    const wake = h.outbox.getById(`wake-intent-${created.qitemId}`)!;
+    expect(wake.deliveryState).toBe("failed");
+    expect(h.repo.getById(created.qitemId)?.state).toBe("pending");
+    expect(h.calls[0]?.opts).toMatchObject({ verify: true, queueWake: true, waitForIdleMs: 10_000 });
+  });
+
+  it("a no-write idle-wait expiry cannot resolve an earlier ambiguous wake; recovery can still deliver it later", async () => {
+    h.outcome.mode = "timeout";
+    const { created } = await doHandoff();
+    const intentId = `wake-intent-${created.qitemId}`;
+    expect(h.outbox.getById(intentId)!.deliveryState).toBe("indeterminate");
+
+    h.outcome.mode = "wait-busy";
+    const retry = await h.repo.drainPendingWakeIntents();
+    expect(retry.indeterminate).toBe(1);
+    expect(h.outbox.getById(intentId)!.deliveryState).toBe("indeterminate");
+    expect(h.repo.getById(created.qitemId)?.state).toBe("pending");
+
+    h.outcome.mode = "verified";
+    const recovered = await h.repo.drainPendingWakeIntents();
+    expect(recovered.delivered).toBe(1);
+    expect(h.outbox.getById(intentId)!.deliveryState).toBe("delivered");
   });
 
   it("retries a current failed intent on the next recovery pass", async () => {

@@ -303,6 +303,9 @@ interface QueueItemRow {
   target_repo: string | null;
 }
 
+// Queue wakes may wait briefly for an active turn to finish, but never type into a turn that stays busy.
+const QUEUE_WAKE_IDLE_WAIT_MS = 10_000;
+
 /**
  * Async transport contract — exists in this domain module so QueueRepository
  * can do durable+waking handoffs (Phase A contract: queue create / handoff /
@@ -322,7 +325,7 @@ export interface QueueNudgeTransport {
     // (h): stampISO threads the nudge's compose time so the transport's delivered-latency calc can
     // measure the wait for a handoff nudge too (the real impl is SessionTransport, which accepts it).
     text: string,
-    opts?: { verify?: boolean; stampISO?: string; actorSession?: string; committedOutboxIds?: string[]; deliveryId?: string; auditPointer?: string; queueWake?: boolean }
+    opts?: { verify?: boolean; waitForIdleMs?: number; stampISO?: string; actorSession?: string; committedOutboxIds?: string[]; deliveryId?: string; auditPointer?: string; queueWake?: boolean }
   ): Promise<{ ok: boolean; verified?: boolean; sent?: boolean; inputPhase?: "not_reached" | "attempted" | "written"; error?: string; reason?: string; outcome?: string }>;
 }
 
@@ -1105,7 +1108,10 @@ export class QueueRepository {
     // Input evidence survives receipt removal: an issued paste or uncertain Enter is never an unsent failure.
     const inputUncertain = res.sent === true || res.inputPhase === "attempted" || res.inputPhase === "written"
       || (res.sent !== false && res.inputPhase !== "not_reached" && (res.reason === "delivery_indeterminate" || res.reason === "submit_failed"));
-    if (inputUncertain || isWakeTimeoutSignal(res.reason) || isWakeTimeoutSignal(res.error)) {
+    // A timeout while waiting to reach idle is a definite no-write, unlike a timeout after
+    // typing/verification began. The delivery caller preserves earlier ambiguous attempts.
+    const inputNotReached = res.sent === false || res.inputPhase === "not_reached";
+    if (inputUncertain || (!inputNotReached && (isWakeTimeoutSignal(res.reason) || isWakeTimeoutSignal(res.error)))) {
       return { classified: "indeterminate", nudgeResult: `indeterminate:${detail}` };
     }
     return { classified: "failed", nudgeResult: `failed:${detail}` };
@@ -1752,7 +1758,7 @@ export class QueueRepository {
     }
     try {
       const admission = this.wakeAdmission(qitemId, trigger);
-      const res = await this.transport!.send(destinationSession, text, { verify: true, stampISO, actorSession: sourceSession, committedOutboxIds,
+      const res = await this.transport!.send(destinationSession, text, { verify: true, waitForIdleMs: QUEUE_WAKE_IDLE_WAIT_MS, stampISO, actorSession: sourceSession, committedOutboxIds,
         deliveryId: committedOutboxIds ? undefined : deliveryId, auditPointer: qitemId, queueWake: true,
         ...(trigger === "openrig" ? { openrigNotice: true as const } : {}), ...(admission.urgentBy ? { urgent: { by: admission.urgentBy } } : {}),
         ...(recheckMembers ? { recheckMembers } : {}) });

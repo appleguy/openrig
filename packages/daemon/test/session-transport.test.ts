@@ -581,7 +581,7 @@ describe("SessionTransport", () => {
   it("community contract: a successful queue wake passes through the transport once", async () => {
     const { session } = seedCanonicalRig("synth");
     sessionRegistry.recordCommunityHarnessSelection(session.id, "synth");
-    let screen = "custom harness screen";
+    let screen = "› Use /skills to list available skills\n\n  gpt-5.5 high · Context [████ ] · ~/code/projects/openrig";
     const sendText = vi.fn(async (_target: string, text: string) => { screen = text; return { ok: true as const }; });
     const sendKeys = vi.fn(async () => ({ ok: true as const }));
     const transport = createTransport(mockTmux({ getPaneCommand: async () => "node", capturePaneContent: async () => screen, sendText, sendKeys }),
