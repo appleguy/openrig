@@ -1,6 +1,6 @@
 import { readFileSync, statSync } from "node:fs";
 import { splitFrontmatter } from "./scope/scope-fs.js";
-import type { WorkInstallPiece, WorkInstallResult, WorkInstallSource } from "./work-install.js";
+import type { WorkInstallPiece, WorkInstallResult, WorkInstallSource, WorkInstallSelectedBy } from "./work-install.js";
 
 export type GoalObjectiveAltitude = "slice" | "mission";
 
@@ -18,7 +18,18 @@ export interface GoalObjectiveFallback {
   reason: GoalObjectiveFallbackReason;
 }
 
+/** The context belongs to the invoking seat's work-install selection, not the target goal seat. */
+export interface GoalWorkPositionSource {
+  selectedFor: "caller";
+  selectedBy: WorkInstallSelectedBy;
+  projectId: string | null;
+  mission: string | null;
+  slice: string | null;
+}
+
 export interface GoalObjectiveMetadata extends GoalObjectiveSource {
+  /** Present when the caller explicitly opted into deriving an objective from its selected work position. */
+  workPosition?: GoalWorkPositionSource;
   fallback?: GoalObjectiveFallback;
 }
 

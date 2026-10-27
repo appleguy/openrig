@@ -40,7 +40,8 @@ describe("seat goal progress trail", () => {
 
   it("records the actual result in the selected slice and is idempotent on replay", () => {
     work = makeWork();
-    const outcome = { operation: "set" as const, seat: "audit-lead@kernel", threadId: "thread-1", changed: true, status: "active",
+    const outcome = { eventId: "mutation-a", operation: "set" as const, objectiveEffect: "replaced" as const,
+      seat: "audit-lead@kernel", threadId: "thread-1", changed: true, status: "active",
       objectiveSource: { altitude: "slice" as const, specPath: join(root, "missions/audit/slices/01-goal/SPEC.md"),
         specAddress: "mission:slices/01-goal/SPEC.md", selectionSource: "explicit" as const } };
 
@@ -49,12 +50,42 @@ describe("seat goal progress trail", () => {
 
     expect(first.target).toMatchObject({ ok: true, scope: "slice", mission: "audit", slice: "01-goal" });
     expect(first.changed).toBe(true);
+    expect(first.recorded).toBe(true);
     expect(replay.changed).toBe(false);
+    expect(replay.recorded).toBe(true);
     const sliceProgress = readFileSync(join(root, "missions/audit/slices/01-goal/PROGRESS.md"), "utf8");
     expect(sliceProgress.match(/Codex seat goal set:/g)).toHaveLength(1);
     expect(sliceProgress).toContain("set active");
     expect(sliceProgress).toContain("mission:slices/01-goal/SPEC.md");
+    expect(sliceProgress).toContain("caller work position");
     expect(readFileSync(join(root, "missions/audit/PROGRESS.md"), "utf8")).not.toContain("Codex seat goal");
+  });
+
+  it("records repeated real transitions while keeping each event replay idempotent and no-ops silent", () => {
+    work = makeWork();
+    const setActive = { eventId: "mutation-1", operation: "set" as const, objectiveEffect: "preserved" as const,
+      seat: "audit-lead@kernel", threadId: "thread-1", changed: true, status: "active" };
+    const cleared = { eventId: "mutation-2", operation: "clear" as const, objectiveEffect: "cleared" as const,
+      seat: "audit-lead@kernel", threadId: "thread-1", changed: true, status: null };
+    const setActiveAgain = { ...setActive, eventId: "mutation-3" };
+    const noop = { ...setActive, eventId: "mutation-noop", changed: false };
+
+    recordSeatGoalOutcome(work, setActive);
+    recordSeatGoalOutcome(work, setActive);
+    recordSeatGoalOutcome(work, cleared);
+    recordSeatGoalOutcome(work, setActiveAgain);
+    const beforeNoop = readFileSync(join(root, "missions/audit/slices/01-goal/PROGRESS.md"), "utf8");
+    const noopResult = recordSeatGoalOutcome(work, noop);
+    const afterNoop = readFileSync(join(root, "missions/audit/slices/01-goal/PROGRESS.md"), "utf8");
+
+    expect(noopResult).toMatchObject({ changed: false, recorded: false });
+    expect(afterNoop).toBe(beforeNoop);
+    expect(afterNoop.match(/Codex seat goal set:/g)).toHaveLength(2);
+    expect(afterNoop.match(/Codex seat goal clear:/g)).toHaveLength(1);
+    expect(afterNoop).toContain("event=mutation-1");
+    expect(afterNoop).toContain("event=mutation-2");
+    expect(afterNoop).toContain("event=mutation-3");
+    expect(afterNoop.match(/event=mutation-1/g)).toHaveLength(1);
   });
 
   it("refuses to mutate when the selected scope has no existing progress rail", () => {

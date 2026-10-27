@@ -5,7 +5,10 @@ import type { WorkInstallResult } from "./work-install.js";
 import type { GoalObjectiveMetadata } from "./seat-goal-objective.js";
 
 export interface SeatGoalOutcome {
+  /** Stable for this successful CLI request, so replaying its trail write remains idempotent. */
+  eventId: string;
   operation: "set" | "clear";
+  objectiveEffect: "preserved" | "replaced" | "cleared";
   seat: string;
   threadId: string;
   changed: boolean;
@@ -67,23 +70,33 @@ export function resolveSeatGoalTrailTarget(work: WorkInstallResult): SeatGoalTra
 export function recordSeatGoalOutcome(work: WorkInstallResult, outcome: SeatGoalOutcome): {
   target: SeatGoalTrailTarget & { ok: true };
   changed: boolean;
+  recorded: boolean;
 } {
+  if ("error" in work) throw Object.assign(new Error(work.error.message), { code: work.error.code });
   const target = resolveSeatGoalTrailTarget(work);
   if (!target.ok) throw Object.assign(new Error(target.message), { code: target.code });
 
-  const source = outcome.objectiveSource ? formatSource(outcome.objectiveSource) : "explicit objective";
+  if (!outcome.changed) return { target, changed: false, recorded: false };
+
+  const source = outcome.objectiveSource ? formatSource(outcome.objectiveSource) : outcome.objectiveEffect;
   const result = outcome.operation === "clear" ? "cleared" : `set ${outcome.status ?? "unknown status"}`;
-  const text = `Codex seat goal ${outcome.operation}: ${result}; seat=${outcome.seat}; thread=${outcome.threadId}; changed=${outcome.changed}; source=${source}`;
+  const position = work.position;
+  const workPosition = `caller work position project=${position.projectId ?? "workspace"}; mission=${position.mission ?? "none"}; slice=${position.slice ?? "none"}; selectedBy=${position.selectedBy}`;
+  const text = `Codex seat goal ${outcome.operation}: ${result}; seat=${outcome.seat}; thread=${outcome.threadId}; objective=${outcome.objectiveEffect}; source=${source}; ${workPosition}; event=${outcome.eventId}`;
   const before = readFileSync(target.path, "utf8");
   const edited = addProgressRow(before, { section: "Outcomes", text, status: "done" });
   if (edited.changed) writeFileSync(target.path, edited.content, "utf8");
-  return { target, changed: edited.changed };
+  return { target, changed: edited.changed, recorded: true };
 }
 
 function formatSource(source: GoalObjectiveMetadata): string {
-  return source.fallback
+  const objectiveSource = source.fallback
     ? `${source.altitude}:${source.specAddress} (fallback from ${source.fallback.from.specAddress}: ${source.fallback.reason})`
     : `${source.altitude}:${source.specAddress}`;
+  const position = source.workPosition;
+  if (!position) return `${objectiveSource} from caller work position`;
+  return `${objectiveSource} from caller work position ${position.projectId ?? "workspace"}:${position.mission ?? "none"}`
+    + `${position.slice ? `/slices/${position.slice}` : ""} (selectedBy=${position.selectedBy})`;
 }
 
 function isDirectory(path: string): boolean {

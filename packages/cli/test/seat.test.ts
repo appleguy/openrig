@@ -63,22 +63,25 @@ function makeCommand(deps: SeatDeps): Command {
 }
 
 describe("seat goal", () => {
-  it("defaults the objective from the selected slice and lets the service resolve the verified target binding", async () => {
+  it("derives only from an explicit caller-scope selection and identifies caller provenance for a different target", async () => {
     const paths: string[] = [], bodies: unknown[] = [];
     const work = makeGoalWork();
+    work.position.projectId = "caller-project";
+    work.position.selectedBy = "cwd";
     const recordGoalOutcome = vi.fn(() => ({ target: { ok: true as const, path: "/audit/slices/01-selected/PROGRESS.md", scope: "slice" as const, mission: "audit", slice: "01-selected" }, changed: true }));
     const deps = makeDeps({ status: 200, data: { ok: true, threadId: "01a179a1-9ac1-7cf1-b249-4acf7d07868a", changed: true,
       goal: { threadId: "01a179a1-9ac1-7cf1-b249-4acf7d07868a", objective: "Slice objective", status: "active" } } }, paths, bodies,
     { workInstall: () => work, recordGoalOutcome });
-    const output = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "goal", "set", "audit-lead@kernel",
-      "--status", "active", "--json"]).then(() => {}));
+    const output = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "goal", "set", "target-seat@remote-rig",
+      "--status", "active", "--from-scope", "--json"]).then(() => {}));
     expect(output.exitCode).toBeUndefined();
-    expect(paths).toEqual(["/api/seat/goal/audit-lead%40kernel"]);
+    expect(paths).toEqual(["/api/seat/goal/target-seat%40remote-rig"]);
     expect(bodies).toEqual([{ operation: "set", status: "active", objective: "Slice objective", objectiveSource: {
       altitude: "slice", specPath: realpathSync(join(goalFixtureRoot!, "missions/audit/slices/01-selected/SPEC.md")),
       specAddress: "mission:slices/01-selected/SPEC.md", selectionSource: "explicit",
+      workPosition: { selectedFor: "caller", selectedBy: "cwd", projectId: "caller-project", mission: "audit", slice: "01-selected" },
     } }]);
-    expect(recordGoalOutcome).toHaveBeenCalledWith(work, expect.objectContaining({ operation: "set", seat: "audit-lead@kernel",
+    expect(recordGoalOutcome).toHaveBeenCalledWith(work, expect.objectContaining({ operation: "set", seat: "target-seat@remote-rig",
       threadId: "01a179a1-9ac1-7cf1-b249-4acf7d07868a", changed: true, status: "active" }));
     expect(output.logs.join("\n")).toContain('"progressTrail"');
   });
@@ -107,11 +110,48 @@ describe("seat goal", () => {
     expect(bodies[0]).toMatchObject({ objective: "full goal\nsecond line\n" });
   });
 
-  it("fails closed before the goal service when work-install has no selected scope", async () => {
+  it("allows an explicit objective without a mission rail and reports the missing caller scope", async () => {
+    const paths: string[] = [], bodies: unknown[] = [];
+    const deps = makeDeps({ status: 200, data: { ok: true, threadId: "01a179a1-9ac1-7cf1-b249-4acf7d07868a", changed: true,
+      goal: { threadId: "01a179a1-9ac1-7cf1-b249-4acf7d07868a", objective: "Manual objective", status: "active" } } }, paths, bodies,
+      { workInstall: () => ({ error: { code: "goal_scope_missing", message: "No mission" } }) });
+    const output = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "goal", "set", "kernel-seat",
+      "--status", "active", "--objective", "Manual objective", "--json"]).then(() => {}));
+    expect(output.exitCode).toBeUndefined();
+    expect(paths).toEqual(["/api/seat/goal/kernel-seat"]);
+    expect(bodies).toEqual([{ operation: "set", status: "active", objective: "Manual objective" }]);
+    expect(JSON.parse(output.logs[0]!).progressTrail).toMatchObject({ ok: false, code: "goal_scope_missing", recorded: false });
+  });
+
+  it("allows clear without a mission rail and reports the missing caller scope", async () => {
+    const paths: string[] = [], bodies: unknown[] = [];
+    const deps = makeDeps({ status: 200, data: { ok: true, threadId: "01a179a1-9ac1-7cf1-b249-4acf7d07868a", changed: true, goal: null } }, paths, bodies,
+      { workInstall: () => ({ error: { code: "goal_scope_missing", message: "No mission" } }) });
+    const output = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "goal", "clear", "kernel-seat", "--json"]).then(() => {}));
+    expect(output.exitCode).toBeUndefined();
+    expect(paths).toEqual(["/api/seat/goal/kernel-seat"]);
+    expect(bodies).toEqual([{ operation: "clear" }]);
+    expect(JSON.parse(output.logs[0]!).progressTrail).toMatchObject({ ok: false, code: "goal_scope_missing", recorded: false });
+  });
+
+  it("preserves the current objective on status-only set", async () => {
+    const paths: string[] = [], bodies: unknown[] = [];
+    const deps = makeDeps({ status: 200, data: { ok: true, threadId: "01a179a1-9ac1-7cf1-b249-4acf7d07868a", changed: true,
+      goal: { threadId: "01a179a1-9ac1-7cf1-b249-4acf7d07868a", objective: "Existing objective", status: "paused" } } }, paths, bodies,
+      { workInstall: () => ({ error: { code: "goal_scope_missing", message: "No mission" } }) });
+    const output = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "goal", "set", "kernel-seat",
+      "--status", "paused", "--json"]).then(() => {}));
+    expect(output.exitCode).toBeUndefined();
+    expect(bodies).toEqual([{ operation: "set", status: "paused" }]);
+    expect(JSON.parse(output.logs[0]!).progressTrail).toMatchObject({ ok: false, code: "goal_scope_missing" });
+  });
+
+  it("requires a selected mission SPEC only for --from-scope", async () => {
     const paths: string[] = [], bodies: unknown[] = [];
     const deps = makeDeps({ status: 200, data: { ok: true } }, paths, bodies,
       { workInstall: () => ({ error: { code: "goal_scope_missing", message: "No mission" } }) });
-    const output = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "goal", "set", "audit-lead@kernel", "--status", "active"]).then(() => {}));
+    const output = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "goal", "set", "kernel-seat",
+      "--status", "active", "--from-scope"]).then(() => {}));
     expect(output.exitCode).toBe(1);
     expect(paths).toEqual([]);
     expect(bodies).toEqual([]);

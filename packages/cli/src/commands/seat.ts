@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Command } from "commander";
@@ -16,7 +17,7 @@ import { resolveWorkPosition, type WorkInstallResult } from "../lib/work-install
 
 export type SeatDeps = StatusDeps & {
   workInstall?: () => WorkInstallResult;
-  recordGoalOutcome?: (work: WorkInstallResult, outcome: SeatGoalOutcome) => { target: { path: string; scope: "mission" | "slice"; mission: string; slice?: string; ok: true }; changed: boolean };
+  recordGoalOutcome?: (work: WorkInstallResult, outcome: SeatGoalOutcome) => { target: { path: string; scope: "mission" | "slice"; mission: string; slice?: string; ok: true }; changed: boolean; recorded?: boolean };
 };
 
 /** Read all of STDIN to EOF as a UTF-8 string. Used by set-resume-token so the
@@ -28,17 +29,32 @@ async function defaultReadStdin(): Promise<string> {
 }
 
 function resolveSeatGoalWorkInstall(): WorkInstallResult {
-  const store = new ConfigStore();
-  const systemWorld = store.resolveWithSource("context.system_world");
-  return resolveWorkPosition({
-    workspaceRoot: String(store.resolveWithSource("workspace.root").value),
-    catalogPath: String(store.resolveWithSource("workspace.catalog_path").value),
-    contextRoot: String(store.resolveWithSource("context.root").value),
-    systemWorldSelection: String(systemWorld.value),
-    systemWorldSource: systemWorld.source,
-    cwd: resolve(process.cwd()),
-    ...(process.env["OPENRIG_SESSION_NAME"] ? { sessionName: process.env["OPENRIG_SESSION_NAME"] } : {}),
-  });
+  try {
+    const store = new ConfigStore();
+    const systemWorld = store.resolveWithSource("context.system_world");
+    return resolveWorkPosition({
+      workspaceRoot: String(store.resolveWithSource("workspace.root").value),
+      catalogPath: String(store.resolveWithSource("workspace.catalog_path").value),
+      contextRoot: String(store.resolveWithSource("context.root").value),
+      systemWorldSelection: String(systemWorld.value),
+      systemWorldSource: systemWorld.source,
+      cwd: resolve(process.cwd()),
+      ...(process.env["OPENRIG_SESSION_NAME"] ? { sessionName: process.env["OPENRIG_SESSION_NAME"] } : {}),
+    });
+  } catch (error) {
+    return { error: { code: "goal_work_position_unavailable", message: (error as Error).message } };
+  }
+}
+
+function callerWorkPosition(work: WorkInstallResult) {
+  if ("error" in work) return undefined;
+  return {
+    selectedFor: "caller" as const,
+    selectedBy: work.position.selectedBy,
+    projectId: work.position.projectId,
+    mission: work.position.mission,
+    slice: work.position.slice,
+  };
 }
 
 interface SeatStatusResponse {
@@ -441,35 +457,40 @@ export function seatCommand(depsOverride?: SeatDeps & { readStdin?: () => Promis
       .option("--socket <path>", "Optional exact Unix app-server socket; default is the target process's verified endpoint")
       .option("--json", "JSON output");
     if (operation === "set") action.requiredOption("--status <status>", "active, paused, blocked, usageLimited, budgetLimited or complete")
-      .option("--objective <text>", "Replace the objective; omitted uses the selected slice or mission SPEC intent")
-      .option("--objective-stdin", "Read the complete replacement objective from stdin");
-    action.action(async (seat: string, opts: { thread?: string; socket?: string; status?: string; objective?: string; objectiveStdin?: boolean; json?: boolean }) => {
+      .option("--objective <text>", "Replace the objective; omitted preserves it")
+      .option("--objective-stdin", "Read the complete replacement objective from stdin")
+      .option("--from-scope", "Replace it with intent from the caller's selected mission or slice SPEC");
+    action.action(async (seat: string, opts: { thread?: string; socket?: string; status?: string; objective?: string; objectiveStdin?: boolean; fromScope?: boolean; json?: boolean }) => {
       if (opts.objective !== undefined && opts.objectiveStdin) {
         console.error("Choose --objective or --objective-stdin"); process.exitCode = 1; return;
+      }
+      if (opts.fromScope && (opts.objective !== undefined || opts.objectiveStdin)) {
+        console.error("Choose --from-scope or an explicit objective"); process.exitCode = 1; return;
       }
       let objective = opts.objectiveStdin ? await readStdin() : opts.objective;
       let objectiveSource: GoalObjectiveMetadata | undefined;
       let work: WorkInstallResult | undefined;
-      if (operation !== "get") {
+      if (operation === "set" && opts.fromScope) {
         work = depsOverride?.workInstall?.() ?? resolveSeatGoalWorkInstall();
-        const trailTarget = resolveSeatGoalTrailTarget(work);
-        if (!trailTarget.ok) {
-          console.log(JSON.stringify({ ok: false, code: trailTarget.code, message: trailTarget.message }, null, opts.json ? undefined : 2));
+        const resolution = resolveSeatGoalObjective(work);
+        if (!resolution.ok) {
+          console.log(JSON.stringify({ ok: false, code: resolution.error.code, message: resolution.error.message,
+            ...(resolution.error.candidates ? { candidates: resolution.error.candidates } : {}) }, null, opts.json ? undefined : 2));
           process.exitCode = 1;
           return;
         }
-        if (operation === "set" && objective === undefined) {
-          const resolution = resolveSeatGoalObjective(work);
-          if (!resolution.ok) {
-            console.log(JSON.stringify({ ok: false, code: resolution.error.code, message: resolution.error.message,
-              ...(resolution.error.candidates ? { candidates: resolution.error.candidates } : {}) }, null, opts.json ? undefined : 2));
-            process.exitCode = 1;
-            return;
-          }
-          objective = resolution.objective;
-          objectiveSource = { ...resolution.source, ...(resolution.fallback ? { fallback: resolution.fallback } : {}) };
+        const workPosition = callerWorkPosition(work);
+        if (!workPosition) {
+          console.log(JSON.stringify({ ok: false, code: "goal_work_position_unavailable", message: "The caller's work position could not be recorded." }, null, opts.json ? undefined : 2));
+          process.exitCode = 1;
+          return;
         }
+        objective = resolution.objective;
+        objectiveSource = { ...resolution.source, workPosition,
+          ...(resolution.fallback ? { fallback: resolution.fallback } : {}) };
       }
+      const operationId = operation === "get" ? undefined : randomUUID();
+      const objectiveEffect = operation === "clear" ? "cleared" : objective === undefined ? "preserved" : "replaced";
       const requestBody: Record<string, unknown> = {
         operation,
         ...(opts.thread !== undefined ? { threadId: opts.thread } : {}),
@@ -483,13 +504,23 @@ export function seatCommand(depsOverride?: SeatDeps & { readStdin?: () => Promis
           if (!threadId) throw Object.assign(new Error("The goal service did not return the verified native thread id."), { code: "goal_identity_unverified" });
           const goalValue = data.goal && typeof data.goal === "object" ? data.goal as Record<string, unknown> : null;
           const outcome: SeatGoalOutcome = {
-            operation: operation as "set" | "clear", seat, threadId,
+            eventId: operationId!, operation: operation as "set" | "clear", objectiveEffect, seat, threadId,
             changed: data.changed === true,
             status: typeof goalValue?.status === "string" ? goalValue.status : null,
             ...(objectiveSource ? { objectiveSource } : {}),
           };
-          const recorded = depsOverride?.recordGoalOutcome?.(work!, outcome) ?? recordSeatGoalOutcome(work!, outcome);
-          return { ...data, progressTrail: { ...recorded.target, changed: recorded.changed } };
+          const trailWork = work ?? (depsOverride?.workInstall?.() ?? resolveSeatGoalWorkInstall());
+          const trailTarget = resolveSeatGoalTrailTarget(trailWork);
+          if (!trailTarget.ok) return { ...data, progressTrail: {
+            ok: false, code: trailTarget.code, message: trailTarget.message,
+            selectionContext: "caller", recorded: false,
+          } };
+          const recorded = depsOverride?.recordGoalOutcome?.(trailWork, outcome) ?? recordSeatGoalOutcome(trailWork, outcome);
+          const workPosition = callerWorkPosition(trailWork);
+          return { ...data, progressTrail: {
+            ...recorded.target, selectionContext: "caller", ...(workPosition ? { workPositionSelectedBy: workPosition.selectedBy } : {}),
+            changed: recorded.changed, recorded: outcome.changed && (recorded.recorded ?? true),
+          } };
         });
     });
   }
