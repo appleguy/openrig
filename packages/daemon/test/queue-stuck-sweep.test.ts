@@ -53,6 +53,12 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     return repo.create({ sourceSession: "sender@r", destinationSession: dest, body: "work" });
   }
 
+  async function mkBaton(dest = "worker@r"): Promise<QueueItem> {
+    const source = await repo.create({ sourceSession: "sender@r", destinationSession: "relay@r", body: "work", nudge: false });
+    const { created } = await repo.handoff({ qitemId: source.qitemId, fromSession: "relay@r", toSession: dest, nudge: false });
+    return created;
+  }
+
   /** Fixture aging of EXISTING facts via SQL — product code never sees an injected clock. */
   function ageCreated(qitemId: string, minutes: number): void {
     const past = new Date(Date.now() - minutes * 60_000).toISOString();
@@ -896,6 +902,31 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     });
     await runSweep();
     expect(await findingsFor(row.qitemId)).toHaveLength(0);
+  });
+
+  it("S01 SEAM — SCHEDULED RETRY BACKSTOP: a future retry is deferred while an overdue retry remains reportable", async () => {
+    const future = await mkBaton();
+    setNudgeResult(future.qitemId, "failed:tmux session not found", new Date(Date.now() - 60_000));
+    const futureBackstop = repo.waitingView(future.qitemId)!.nextBackstop;
+    expect(futureBackstop).toMatchObject({ mechanism: "queue-wake-ladder:retry" });
+    expect(Date.parse(futureBackstop.dueAt!)).toBeGreaterThan(Date.now());
+
+    const overdue = await mkBaton();
+    setNudgeResult(overdue.qitemId, "failed:tmux session not found", new Date(Date.now() - 10 * 60_000));
+    const existing = await mkBaton();
+    setNudgeResult(existing.qitemId, "failed:tmux session not found", new Date(Date.now() - 10 * 60_000));
+
+    await runSweep();
+    expect(await findingsFor(future.qitemId)).toHaveLength(0);
+    expect(await findingsFor(overdue.qitemId)).toHaveLength(1);
+    const [openFinding] = await findingsFor(existing.qitemId);
+    expect(openFinding!.state).toBe("pending");
+
+    setNudgeResult(existing.qitemId, "failed:tmux session not found", new Date(Date.now() - 60_000));
+    const updatedBackstop = repo.waitingView(existing.qitemId)!.nextBackstop;
+    expect(Date.parse(updatedBackstop.dueAt!)).toBeGreaterThan(Date.now());
+    await runSweep();
+    expect(repo.getById(openFinding!.qitemId)!.state).toBe("pending");
   });
 
   it("S01 SEAM — EXHAUSTED HANDBACK CAUGHT: a laddered-then-exhausted row is the sweep's net again — exactly one finding", async () => {

@@ -331,6 +331,13 @@ function hasLiveLadder(db: Database.Database, qitemId: string, now: Date, suppre
   return false;
 }
 
+function hasFutureWakeRetryBackstop(row: QueueItem, now: Date): boolean {
+  const backstop = row.waiting?.nextBackstop;
+  if (backstop?.mechanism !== "queue-wake-ladder:retry" || !backstop.dueAt) return false;
+  const dueAt = Date.parse(backstop.dueAt);
+  return Number.isFinite(dueAt) && dueAt > now.getTime();
+}
+
 
 function minutesSince(iso: string | null | undefined, now: Date): number {
   if (!iso) return 0;
@@ -558,10 +565,12 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       // live release job is orphaned: both stay findings, with their own reason.
       const quiet = quietHoldCustody(deps.db, row.qitemId, now);
       if (quiet && (quiet.state === "held" || quiet.state === "released")) continue;
-      // The ladder check runs LAST, so only a row the ladder ALONE would have stopped counts
-      // as ladder-suppressed (#1419). Agent wake retries do not own the separate notice to a
-      // person: a human notice is never the ladder's to suppress.
-      if (!humanNotice && hasLiveLadder(deps.db, row.qitemId, now, suppressionMinutes)) {
+      // The retry check runs LAST, so only a row the ladder ALONE would have stopped counts
+      // as suppressed (#1419). A scheduled retry is projected before its first marker is
+      // written; defer only while that existing backstop is genuinely future. Agent retries
+      // do not own the separate notice to a person, so human notices are never suppressed.
+      if (!humanNotice && (hasLiveLadder(deps.db, row.qitemId, now, suppressionMinutes)
+        || hasFutureWakeRetryBackstop(row, now))) {
         suppressedTags.add(findingDedupTag("undelivered-wake", row.qitemId));
         continue;
       }
