@@ -25,6 +25,7 @@ import { resolveNodeWorkspace } from "./workspace/workspace-resolver.js";
 import { deriveCanonicalSessionName } from "./session-name.js";
 import { buildNativeResumeCommand, buildCodexResumeCore } from "./native-resume-probe.js";
 import { NativePermissionStore } from "./native-permission-store.js";
+import { claudePostureFlag } from "../adapters/yolo-mode.js";
 import { codexMemberEnvelope } from "./codex-member-permissions.js";
 import { codexEnvelopeArgs } from "./codex-rebuild-permissions.js";
 import { shellQuote } from "../adapters/shell-quote.js";
@@ -158,6 +159,9 @@ function computeResumeCommand(
   effort: string | null,
   codexDaemonOptOut?: boolean,
 ): string | null {
+  if (row.runtime === "claude-code") {
+    return computeClaudeResumeCommand(db, row.node_id, row.resume_token, null, row.rig_name === "kernel");
+  }
   if (row.runtime === "codex" && row.resume_token) {
     return computeCodexResumeCommand({
       db,
@@ -173,6 +177,26 @@ function computeResumeCommand(
   return buildNativeResumeCommand(row.runtime, row.resume_token, null, row.codex_config_profile, codexDaemonOptOut);
 }
 
+/** Render Claude recovery from the seat's saved permission decision. The kernel's
+ * owner-selected recovery posture also keeps Remote Control on its Claude commands;
+ * other rigs retain their own launch posture. */
+function computeClaudeResumeCommand(
+  db: Database.Database,
+  nodeId: string,
+  resumeToken: string | null,
+  sessionName: string | null,
+  remoteControl: boolean,
+  allowPicker = false,
+): string | null {
+  if (!resumeToken && !allowPicker) return null;
+  const permission = new NativePermissionStore(db).resolve(nodeId, "claude-code");
+  const posture = claudePostureFlag(process.env, permission.launchPosture, permission.permissionMode);
+  const remoteControlArg = remoteControl ? " --remote-control" : "";
+  const tokenArg = resumeToken ? ` ${shellQuote(resumeToken)}` : "";
+  const nameArg = resumeToken && sessionName ? ` --name ${shellQuote(sessionName)}` : "";
+  return `claude ${posture}${remoteControlArg} --resume${tokenArg}${nameArg}`;
+}
+
 const CODEX_DAEMON_CHOICE_NOT_RECORDED = "Not recorded whether this seat's last managed launch used --no-daemon. If `codex --help` lists --no-daemon, "
   + "add it right after `codex`, as the managed launch does.";
 
@@ -182,6 +206,7 @@ function computeRecoveryGuidance(input: {
   resumeToken: string | null;
   cwd: string | null;
   sessionName: string | null;
+  rigName: string;
   codexConfigProfile?: string | null;
   nodeId: string;
   rigId: string;
@@ -190,20 +215,23 @@ function computeRecoveryGuidance(input: {
   /** Codex: the current generation's recorded daemon choice; undefined when none was recorded. */
   codexDaemonOptOut?: boolean;
 }): NodeRecoveryGuidance | null {
-  const { runtime, resumeToken, cwd, sessionName, codexConfigProfile, codexDaemonOptOut, nodeId, rigId, model, effort } = input;
+  const { runtime, resumeToken, cwd, sessionName, rigName, codexConfigProfile, codexDaemonOptOut, nodeId, rigId, model, effort } = input;
 
   if (runtime === "claude-code") {
     const commands: string[] = [];
     const notes: string[] = [];
 
     if (resumeToken) {
-      const cmd = buildNativeResumeCommand(runtime, resumeToken, sessionName);
+      const cmd = computeClaudeResumeCommand(input.db, nodeId, resumeToken, sessionName, rigName === "kernel");
       if (cmd) commands.push(cmd);
     }
     if (cwd) {
       commands.push(`cd ${cwd}`);
     }
-    commands.push("claude --resume");
+    const pickerCommand = rigName === "kernel"
+      ? computeClaudeResumeCommand(input.db, nodeId, null, sessionName, true, true)
+      : "claude --resume";
+    if (pickerCommand) commands.push(pickerCommand);
 
     if (sessionName) {
       notes.push(`Look for session name: ${sessionName}`);
@@ -212,7 +240,7 @@ function computeRecoveryGuidance(input: {
 
     return {
       summary: resumeToken
-        ? "Try native Claude resume first, then fall back to the workspace-local picker if needed."
+        ? "Try native Claude resume first; its command preserves this seat's saved permission mode and kernel Remote Control setting. Then use the workspace-local picker if needed."
         : "No stored Claude resume token. Use the workspace-local Claude picker fallback.",
       commands,
       notes,
@@ -1151,6 +1179,7 @@ export function getNodeDetail(
       resumeToken: entry.resumeToken,
       cwd: entry.cwd,
       sessionName: entry.canonicalSessionName,
+      rigName: entry.rigName,
       nodeId: entry.nodeId,
       rigId: entry.rigId,
       codexConfigProfile: entry.codexConfigProfile,
