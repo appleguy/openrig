@@ -32,7 +32,9 @@ export interface TaskTerminalView { task: TaskMembership; members: ViewMemberInp
 interface EpisodeRow {
   qitem_id: string; summary: string | null; destination_session: string; state: string;
   handed_off_from: string | null; chain_of_record: string | null;
+  chain_bytes: number;
 }
+type LineageRow = Pick<EpisodeRow, "qitem_id" | "handed_off_from" | "chain_of_record" | "chain_bytes">;
 const ACTIVE = new Set(["pending", "in-progress", "blocked"]);
 const MAX_EPISODE_ROWS = 256;
 const MAX_LINEAGE_ROWS = 50000;
@@ -58,7 +60,7 @@ export function readTaskTerminalView(
 function readTaskTerminalSnapshot(
   db: Database.Database, qitemId: string, resolveSeat: (address: string) => TaskSeat | null,
 ): TaskTerminalView | null {
-  const load = db.prepare(`SELECT qitem_id,summary,destination_session,state,handed_off_from,${BOUNDED_CHAIN}
+  const load = db.prepare(`SELECT qitem_id,summary,destination_session,state,handed_off_from,${BOUNDED_CHAIN},${CHAIN_BYTES} AS chain_bytes
     FROM queue_items WHERE qitem_id=?`);
   const root = load.get(qitemId) as EpisodeRow | undefined;
   if (!root) return null;
@@ -67,15 +69,15 @@ function readTaskTerminalSnapshot(
   const knownIds = new Set([qitemId]);
   const exists = db.prepare("SELECT 1 FROM queue_items WHERE qitem_id=?");
   const children = new Map<string, string[]>();
+  const indexed = new Set<string>();
+  const ancestors: string[] = [], queued = new Set<string>();
   let scanned = 0, bytes = 0, links = 0;
-  const lineage = db.prepare(`/* task-lineage */ SELECT qitem_id,handed_off_from,${BOUNDED_CHAIN},
-    ${CHAIN_BYTES} AS chain_bytes FROM queue_items
-    WHERE rowid >= (SELECT rowid FROM queue_items WHERE qitem_id=?) ORDER BY rowid LIMIT ?`);
-  scan: for (const value of lineage.iterate(qitemId, MAX_LINEAGE_ROWS + 1)) {
-    if (scanned++ === MAX_LINEAGE_ROWS) { scanIssues.add(`Lineage scan reached its ${MAX_LINEAGE_ROWS}-row work limit; membership is incomplete.`); break; }
-    const row = value as Pick<EpisodeRow, "qitem_id" | "handed_off_from" | "chain_of_record"> & { chain_bytes: number };
+  const indexRow = (row: LineageRow): boolean => {
+    if (indexed.has(row.qitem_id)) return true;
+    if (scanned++ === MAX_LINEAGE_ROWS) { scanIssues.add(`Lineage scan reached its ${MAX_LINEAGE_ROWS}-row work limit; membership is incomplete.`); return false; }
+    indexed.add(row.qitem_id);
     knownIds.add(row.qitem_id);
-    if (bytes + row.chain_bytes > MAX_LINEAGE_BYTES) { scanIssues.add("Lineage scan reached its encoded-byte work limit; membership is incomplete."); break; }
+    if (bytes + row.chain_bytes > MAX_LINEAGE_BYTES) { scanIssues.add("Lineage scan reached its encoded-byte work limit; membership is incomplete."); return false; }
     bytes += row.chain_bytes;
     let chain: unknown = [];
     try { chain = JSON.parse(row.chain_of_record ?? "[]"); } catch { chain = null; }
@@ -83,9 +85,36 @@ function readTaskTerminalSnapshot(
     const refs = new Set([row.handed_off_from, ...(chain as unknown[]).filter((id): id is string => typeof id === "string")]);
     for (const parent of refs) {
       if (!parent) continue;
-      if (++links > MAX_LINEAGE_LINKS) { scanIssues.add("Lineage scan reached its link work limit; membership is incomplete."); break scan; }
+      if (++links > MAX_LINEAGE_LINKS) { scanIssues.add("Lineage scan reached its link work limit; membership is incomplete."); return false; }
       const list = children.get(parent) ?? []; list.push(row.qitem_id); children.set(parent, list);
+      if (!knownIds.has(parent) && !queued.has(parent)) { queued.add(parent); ancestors.push(parent); }
     }
+    return true;
+  };
+  const projection = `SELECT qitem_id,handed_off_from,${BOUNDED_CHAIN},${CHAIN_BYTES} AS chain_bytes FROM queue_items`;
+  const lineage = db.prepare(`/* task-lineage */ ${projection}
+    WHERE rowid >= (SELECT rowid FROM queue_items WHERE qitem_id=?) ORDER BY rowid LIMIT ?`);
+  let withinBudget = true;
+  for (const value of lineage.iterate(qitemId, MAX_LINEAGE_ROWS + 1)) {
+    if (!indexRow(value as LineageRow)) { withinBudget = false; break; }
+  }
+  // Earlier active obligations can reference a root that arrived later. The
+  // existing state index avoids scanning unrelated closed history. Follow
+  // their ancestry by primary key, including closed intermediaries; every
+  // loaded row/link shares the same budgets and is processed at most once.
+  if (withinBudget) {
+    const earlier = db.prepare(`/* task-lineage-older-active */ ${projection} INDEXED BY idx_queue_items_state
+      WHERE state IN ('pending','in-progress','blocked')
+        AND rowid < (SELECT rowid FROM queue_items WHERE qitem_id=?) LIMIT ?`);
+    for (const value of earlier.iterate(qitemId, MAX_LINEAGE_ROWS + 1)) {
+      if (!indexRow(value as LineageRow)) { withinBudget = false; break; }
+    }
+  }
+  for (let i = 0; withinBudget && i < ancestors.length; i++) {
+    const id = ancestors[i]!;
+    if (knownIds.has(id)) continue;
+    const row = load.get(id) as EpisodeRow | undefined;
+    if (row && !indexRow(row)) withinBudget = false;
   }
   issues.push(...scanIssues);
   const episode = [qitemId], seen = new Set(episode);
