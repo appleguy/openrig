@@ -10,6 +10,7 @@
 // tabs); hidden below the lg breakpoint via Tailwind responsive classes.
 
 import { useEffect, useRef } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { launchRigCmux } from "../../hooks/launchRigCmux.js";
 import { postOpenCmux } from "../../hooks/useCmuxLaunch.js";
 
@@ -19,6 +20,12 @@ interface LaunchCmuxButtonProps {
 
 const SUCCESS_TOAST_TIMEOUT_MS = 6000;
 const ERROR_TOAST_TIMEOUT_MS = 8000;
+
+async function fetchCmuxAvailability(): Promise<{ available: boolean }> {
+  const res = await fetch("/api/adapters/cmux/status");
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
 
 export function LaunchCmuxButton({ rigId }: LaunchCmuxButtonProps) {
   // Keep this launcher's transient state out of React rendering. The
@@ -31,6 +38,12 @@ export function LaunchCmuxButton({ rigId }: LaunchCmuxButtonProps) {
   const inFlightRef = useRef(false);
   const clearTimerRef = useRef<number | null>(null);
   const lastMissingRef = useRef<string[]>([]);
+  const cmuxQuery = useQuery({
+    queryKey: ["daemon", "cmux"],
+    queryFn: fetchCmuxAvailability,
+    refetchInterval: 30_000,
+    retry: false,
+  });
 
   useEffect(() => {
     return () => {
@@ -39,6 +52,8 @@ export function LaunchCmuxButton({ rigId }: LaunchCmuxButtonProps) {
       }
     };
   }, []);
+
+  if (cmuxQuery.data?.available === false) return null;
 
   const setPendingUi = (pending: boolean) => {
     const button = buttonRef.current;

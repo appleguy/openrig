@@ -14,6 +14,7 @@
 // the terminal moved up to Overview).
 
 import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { CirclePlay } from "lucide-react";
 import { useNodeDetail, type NodeDetailData } from "../hooks/useNodeDetail.js";
 import { useTopologyActivity } from "../hooks/useTopologyActivity.js";
@@ -190,18 +191,49 @@ function ActionButtonsRow({ rigId, logicalId, data }: { rigId: string; logicalId
   // remote selection the row renders an honest read-only marker instead —
   // acting on a remote host is MH-3/MH-4.
   const actionsAreRemote = useSelectedHostId() !== LOCAL_HOST_ID;
+  const cmuxQuery = useQuery({
+    queryKey: ["daemon", "cmux"],
+    queryFn: async (): Promise<{ available: boolean }> => {
+      const res = await fetch("/api/adapters/cmux/status");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    },
+    refetchInterval: 30_000,
+    retry: false,
+  });
+  const [copyFeedback, setCopyFeedback] = useState<{
+    kind: "attach" | "resume";
+    copied: boolean;
+  } | null>(null);
+  const [cmuxFeedback, setCmuxFeedback] = useState<string | null>(null);
   const handleCopyAttach = async () => {
-    if (data.tmuxAttachCommand) await copyText(data.tmuxAttachCommand);
+    if (!data.tmuxAttachCommand) return;
+    let copied = false;
+    try {
+      copied = await copyText(data.tmuxAttachCommand);
+    } catch {
+      // Keep the command visible below when browser clipboard access is blocked.
+    }
+    setCopyFeedback({ kind: "attach", copied });
   };
   const handleOpenCmux = async () => {
+    setCmuxFeedback(null);
     try {
       await postOpenCmux({ rigId, logicalId });
-    } catch {
-      // best effort
+      setCmuxFeedback("Opened in CMUX.");
+    } catch (error) {
+      setCmuxFeedback(error instanceof Error ? `Could not open CMUX: ${error.message}` : `Could not open CMUX: ${String(error)}`);
     }
   };
   const handleCopyResume = async () => {
-    if (data.resumeCommand) await copyText(data.resumeCommand);
+    if (!data.resumeCommand) return;
+    let copied = false;
+    try {
+      copied = await copyText(data.resumeCommand);
+    } catch {
+      // Keep the command visible below when browser clipboard access is blocked.
+    }
+    setCopyFeedback({ kind: "resume", copied });
   };
   if (actionsAreRemote) {
     return (
@@ -216,14 +248,16 @@ function ActionButtonsRow({ rigId, logicalId, data }: { rigId: string; logicalId
   }
   return (
     <div data-testid="live-node-actions" className="flex flex-wrap gap-2">
-      <button
-        onClick={handleOpenCmux}
-        data-testid="detail-cmux-open"
-        className="inline-flex min-h-11 items-center gap-1.5 px-3 py-2 border border-outline-variant bg-surface-lowest/30 font-mono text-[10px] uppercase tracking-wide text-on-surface hover:bg-surface-low/60"
-      >
-        <ToolMark tool="cmux" size="sm" />
-        Open CMUX
-      </button>
+      {cmuxQuery.data?.available !== false && (
+        <button
+          onClick={handleOpenCmux}
+          data-testid="detail-cmux-open"
+          className="inline-flex min-h-11 items-center gap-1.5 px-3 py-2 border border-outline-variant bg-surface-lowest/30 font-mono text-[10px] uppercase tracking-wide text-on-surface hover:bg-surface-low/60"
+        >
+          <ToolMark tool="cmux" size="sm" />
+          Open CMUX
+        </button>
+      )}
       {data.tmuxAttachCommand && (
         <button
           onClick={handleCopyAttach}
@@ -231,7 +265,7 @@ function ActionButtonsRow({ rigId, logicalId, data }: { rigId: string; logicalId
           className="inline-flex min-h-11 items-center gap-1.5 px-3 py-2 border border-outline-variant bg-surface-lowest/30 font-mono text-[10px] uppercase tracking-wide text-on-surface hover:bg-surface-low/60"
         >
           <ToolMark tool="tmux" size="sm" />
-          Copy tmux attach
+          {copyFeedback?.kind === "attach" && copyFeedback.copied ? "Copied tmux attach" : "Copy tmux attach"}
         </button>
       )}
       {data.resumeCommand && (
@@ -241,8 +275,31 @@ function ActionButtonsRow({ rigId, logicalId, data }: { rigId: string; logicalId
           className="inline-flex min-h-11 items-center gap-1.5 px-3 py-2 border border-outline-variant bg-surface-lowest/30 font-mono text-[10px] uppercase tracking-wide text-on-surface hover:bg-surface-low/60"
         >
           <CirclePlay aria-hidden="true" className="h-4 w-4 shrink-0" strokeWidth={1.5} />
-          Copy resume command
+          {copyFeedback?.kind === "resume" && copyFeedback.copied ? "Copied resume command" : "Copy resume command"}
         </button>
+      )}
+      {copyFeedback && !copyFeedback.copied && (
+        <div role="status" aria-live="polite" data-testid="detail-copy-fallback" className="basis-full font-mono text-[10px] text-amber-700">
+          Clipboard unavailable. Select and copy this {copyFeedback.kind === "attach" ? "attach" : "resume"} command:
+          <code className="mt-1 block select-all break-all rounded border border-outline-variant bg-surface-low p-2 text-on-surface">
+            {copyFeedback.kind === "attach" ? data.tmuxAttachCommand : data.resumeCommand}
+          </code>
+        </div>
+      )}
+      {copyFeedback?.copied && (
+        <span role="status" aria-live="polite" data-testid="detail-copy-success" className="sr-only">
+          {copyFeedback.kind === "attach" ? "tmux attach command copied." : "Resume command copied."}
+        </span>
+      )}
+      {cmuxFeedback && (
+        <span
+          role="status"
+          aria-live="polite"
+          data-testid="detail-cmux-feedback"
+          className={`basis-full font-mono text-[10px] ${cmuxFeedback.startsWith("Could not") ? "text-red-700" : "text-green-700"}`}
+        >
+          {cmuxFeedback}
+        </span>
       )}
     </div>
   );

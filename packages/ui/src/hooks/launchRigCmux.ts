@@ -8,6 +8,8 @@
 // Distinct from useCmuxLaunch.ts which targets a single node's
 // open-or-focus endpoint POST /api/rigs/:rigId/nodes/:logicalId/open-cmux.
 
+import { terminalAuthHeaders } from "../components/mission-control/missionControlAuth.js";
+
 export interface RigCmuxLaunchInput {
   rigId: string;
 }
@@ -38,6 +40,7 @@ interface RigCmuxLaunchErrorBody {
 export async function launchRigCmux({ rigId }: RigCmuxLaunchInput): Promise<RigCmuxLaunchSuccess> {
   const res = await fetch(`/api/rigs/${encodeURIComponent(rigId)}/cmux/launch`, {
     method: "POST",
+    headers: terminalAuthHeaders(),
   });
   if (!res.ok) {
     let body: RigCmuxLaunchErrorBody | null = null;

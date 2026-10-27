@@ -19,8 +19,22 @@ function Wrapper({ children }: { children: ReactNode }) {
 
 const originalFetch = globalThis.fetch;
 
+function mockLaunchResponse(response: unknown) {
+  (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(async (url: string) => {
+    if (url === "/api/adapters/cmux/status") {
+      return { ok: true, json: async () => ({ available: true }) };
+    }
+    return response;
+  });
+}
+
 beforeEach(() => {
-  globalThis.fetch = vi.fn() as unknown as typeof fetch;
+  globalThis.fetch = vi.fn(async (url: string) => {
+    if (url === "/api/adapters/cmux/status") {
+      return { ok: true, json: async () => ({ available: true }) };
+    }
+    return { ok: false, status: 404, json: async () => ({}) };
+  }) as unknown as typeof fetch;
 });
 
 afterEach(() => {
@@ -51,8 +65,27 @@ describe("LaunchCmuxButton", () => {
     expect(wrapper.className).toMatch(/lg:/);
   });
 
+  it("hides the launcher when cmux is unavailable", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(async (url: string) => {
+      if (url === "/api/adapters/cmux/status") {
+        return { ok: true, json: async () => ({ available: false }) };
+      }
+      return { ok: true, json: async () => ({ ok: true, workspaces: [] }) };
+    });
+    render(
+      <Wrapper>
+        <LaunchCmuxButton rigId="my-rig" />
+      </Wrapper>,
+    );
+    await waitFor(() => {
+      expect(screen.queryByTestId("launch-cmux-wrapper")).toBeNull();
+    });
+    expect(globalThis.fetch).toHaveBeenCalledWith("/api/adapters/cmux/status");
+    expect(globalThis.fetch).not.toHaveBeenCalledWith("/api/rigs/my-rig/cmux/launch", expect.anything());
+  });
+
   it("click POSTs to /api/rigs/:rigId/cmux/launch", async () => {
-    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+    mockLaunchResponse({
       ok: true,
       status: 200,
       json: async () => ({ ok: true, workspaces: [{ name: "my-rig", agents: ["a", "b"], blanks: 0 }] }),
@@ -76,7 +109,11 @@ describe("LaunchCmuxButton", () => {
     const fetchPromise = new Promise((resolve) => {
       resolveFetch = resolve;
     });
-    (globalThis.fetch as ReturnType<typeof vi.fn>).mockReturnValue(fetchPromise);
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation((url: string) =>
+      url === "/api/adapters/cmux/status"
+        ? Promise.resolve({ ok: true, json: async () => ({ available: true }) })
+        : fetchPromise,
+    );
 
     render(
       <Wrapper>
@@ -103,7 +140,7 @@ describe("LaunchCmuxButton", () => {
   });
 
   it("shows success toast with workspace count + agent count after success", async () => {
-    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+    mockLaunchResponse({
       ok: true,
       status: 200,
       json: async () => ({
@@ -126,7 +163,7 @@ describe("LaunchCmuxButton", () => {
   });
 
   it("shows honest 3-part error toast on 4xx response", async () => {
-    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+    mockLaunchResponse({
       ok: false,
       status: 412,
       json: async () => ({
@@ -147,7 +184,7 @@ describe("LaunchCmuxButton", () => {
   });
 
   it("error toast contains rig name + actionable hint (honest 3-part check)", async () => {
-    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+    mockLaunchResponse({
       ok: false,
       status: 503,
       json: async () => ({
@@ -174,7 +211,7 @@ describe("LaunchCmuxButton", () => {
   // ACTION guidance, violating HG-10/HG-13 honest-error contract.
 
   it("error status does NOT have truncate class (full message visible) — DISCRIMINATING", async () => {
-    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+    mockLaunchResponse({
       ok: false,
       status: 503,
       json: async () => ({
@@ -197,7 +234,7 @@ describe("LaunchCmuxButton", () => {
   });
 
   it("error status text content includes the daemon's full action phrase ('cmux ping')", async () => {
-    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+    mockLaunchResponse({
       ok: false,
       status: 503,
       json: async () => ({
@@ -247,6 +284,9 @@ describe("LaunchCmuxButton", () => {
     const fetchCalls: string[] = [];
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(async (url: string, opts?: RequestInit) => {
       fetchCalls.push(`${opts?.method ?? "GET"} ${url}`);
+      if (url === "/api/adapters/cmux/status") {
+        return new Response(JSON.stringify({ available: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
       if (url.includes("/cmux/launch")) {
         return new Response(
           JSON.stringify({
@@ -296,6 +336,9 @@ describe("LaunchCmuxButton", () => {
     const fetchCalls: string[] = [];
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(async (url: string, opts?: RequestInit) => {
       fetchCalls.push(`${opts?.method ?? "GET"} ${url}`);
+      if (url === "/api/adapters/cmux/status") {
+        return new Response(JSON.stringify({ available: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
       if (url.includes("/cmux/launch")) {
         return new Response(
           JSON.stringify({
@@ -334,7 +377,7 @@ describe("LaunchCmuxButton", () => {
   });
 
   it("partial launch shows missing seat names in status message", async () => {
-    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+    mockLaunchResponse(
       new Response(
         JSON.stringify({
           ok: true,

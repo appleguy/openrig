@@ -9,6 +9,9 @@ import {
 } from "../src/hooks/useTopologyActivity.js";
 import { buildTopologySessionIndex } from "../src/lib/topology-activity.js";
 import { createMockEventSourceClass, instances } from "./helpers/mock-event-source.js";
+import { copyText } from "../src/lib/copy-text.js";
+
+vi.mock("../src/lib/copy-text.js", () => ({ copyText: vi.fn() }));
 
 const mockFetch = vi.fn();
 let OriginalEventSource: typeof EventSource | undefined;
@@ -75,6 +78,7 @@ describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
     OriginalEventSource = globalThis.EventSource;
     globalThis.EventSource = createMockEventSourceClass() as unknown as typeof EventSource;
     resetTopologyActivityStoreForTests();
+    vi.mocked(copyText).mockReset();
     globalThis.fetch = mockFetch as unknown as typeof fetch;
   });
 
@@ -89,8 +93,18 @@ describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
     }
   });
 
-  function mockNodeDetail(detail: Record<string, unknown>) {
+  function mockNodeDetail(detail: Record<string, unknown>, options: { cmuxAvailable?: boolean; cmuxError?: string } = {}) {
     mockFetch.mockImplementation(async (url: string) => {
+      if (url === "/api/adapters/cmux/status") {
+        return { ok: true, json: async () => ({ available: options.cmuxAvailable ?? true }) };
+      }
+      if (typeof url === "string" && url.endsWith("/open-cmux")) {
+        return {
+          ok: !options.cmuxError,
+          status: options.cmuxError ? 503 : 200,
+          json: async () => options.cmuxError ? { message: options.cmuxError } : { ok: true },
+        };
+      }
       if (typeof url === "string" && url.includes("/nodes/")) {
         return { ok: true, json: async () => detail };
       }
@@ -670,5 +684,45 @@ describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
     expect(resumeButton.textContent).toContain("Copy resume command");
     expect(resumeButton.textContent).not.toContain("Claude");
     expect(resumeButton.querySelector("svg")).toBeDefined();
+  });
+
+  it("hides Open CMUX when cmux is unavailable", async () => {
+    mockNodeDetail(NODE_DETAIL, { cmuxAvailable: false });
+    renderDetails();
+    await screen.findByTestId("live-node-actions");
+    await waitFor(() => expect(screen.queryByTestId("detail-cmux-open")).toBeNull());
+    expect(screen.getByTestId("detail-copy-attach")).toBeDefined();
+  });
+
+  it("shows a selectable attach command when clipboard copy fails", async () => {
+    mockNodeDetail(NODE_DETAIL);
+    vi.mocked(copyText).mockResolvedValue(false);
+    renderDetails();
+    fireEvent.click(await screen.findByTestId("detail-copy-attach"));
+
+    const fallback = await screen.findByTestId("detail-copy-fallback");
+    const command = fallback.querySelector("code");
+    expect(command?.textContent).toBe(NODE_DETAIL.tmuxAttachCommand);
+    expect(command?.className).toContain("select-all");
+  });
+
+  it("confirms successful clipboard copy", async () => {
+    mockNodeDetail(NODE_DETAIL);
+    vi.mocked(copyText).mockResolvedValue(true);
+    renderDetails();
+    const button = await screen.findByTestId("detail-copy-attach");
+    fireEvent.click(button);
+
+    await waitFor(() => expect(button.textContent).toContain("Copied tmux attach"));
+    expect(await screen.findByTestId("detail-copy-success")).toBeDefined();
+    expect(screen.queryByTestId("detail-copy-fallback")).toBeNull();
+  });
+
+  it("shows the CMUX rejection message", async () => {
+    mockNodeDetail(NODE_DETAIL, { cmuxError: "cmux control socket unavailable" });
+    renderDetails();
+    fireEvent.click(await screen.findByTestId("detail-cmux-open"));
+
+    expect((await screen.findByTestId("detail-cmux-feedback")).textContent).toContain("Could not open CMUX: cmux control socket unavailable");
   });
 });
