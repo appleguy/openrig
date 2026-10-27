@@ -1,5 +1,6 @@
 import { serve, type ServerType } from "@hono/node-server";
 import path from "node:path";
+import { writeFileSync, renameSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { endProbeGroupsOnStartupSignal, stopRuntimeProbes } from "./adapters/bounded-probe-exec.js";
 import { closeHttpServer, createDaemonShutdown, DAEMON_SHUTDOWN_RECEIPT, trackHttpServerResponses } from "./daemon-shutdown.js";
@@ -449,5 +450,21 @@ if (isDirectRun) {
   // environment to every seat, so drop the launching session's identity.
   const removed = removeParentSessionEnv(process.env);
   if (removed.length) console.log(`[openrig] Seats will not inherit the launching session's ${removed.join(", ")}.`);
-  startServer();
+  const server = await startServer();
+  // A foreground service manager owns this process instead of the CLI launcher.
+  // Publish the same native lifecycle record on every supervised start.
+  if (process.env.OPENRIG_SUPERVISED === "1") {
+    const publish = () => {
+      const address = server.address();
+      if (!address || typeof address === "string") return;
+      const target = path.join(OPENRIG_HOME, "daemon.json");
+      const temporary = `${target}.${process.pid}.tmp`;
+      writeFileSync(temporary, JSON.stringify({ pid: process.pid, port: address.port,
+        host: address.address, db: resolveDaemonDbPath(readOpenRigEnv("OPENRIG_DB", "RIGGED_DB"), OPENRIG_HOME),
+        startedAt: new Date().toISOString() }, null, 2));
+      renameSync(temporary, target);
+    };
+    if (server.listening) publish();
+    else server.once("listening", publish);
+  }
 }
