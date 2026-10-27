@@ -24,6 +24,11 @@ import { hasCompleteGuidanceBlock, seatGuidanceFile } from "./restore-guidance.j
 import { resolveNodeWorkspace } from "./workspace/workspace-resolver.js";
 import { deriveCanonicalSessionName } from "./session-name.js";
 import { buildNativeResumeCommand, buildCodexResumeCore } from "./native-resume-probe.js";
+import { NativePermissionStore } from "./native-permission-store.js";
+import { codexMemberEnvelope } from "./codex-member-permissions.js";
+import { codexEnvelopeArgs } from "./codex-rebuild-permissions.js";
+import { shellQuote } from "../adapters/shell-quote.js";
+import type { NodeBinding } from "./runtime-adapter.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { readReadyFreshLaunchFences } from "./fresh-occupant-relation.js";
 import { tmuxAttachCommand } from "../adapters/tmux-server.js";
@@ -107,23 +112,85 @@ interface BindingRow {
 
 // -- Helpers --
 
-function computeResumeCommand(runtime: string | null, resumeToken: string | null, codexConfigProfile?: string | null, codexDaemonOptOut?: boolean): string | null {
-  return buildNativeResumeCommand(runtime, resumeToken, null, codexConfigProfile, codexDaemonOptOut);
+function computeCodexResumeCommand(input: {
+  db: Database.Database;
+  nodeId: string;
+  rigId: string;
+  resumeToken: string;
+  codexConfigProfile?: string | null;
+  model?: string | null;
+  effort?: string | null;
+  daemonOptOut?: boolean;
+  useLast?: boolean;
+}): string {
+  const { db, nodeId, rigId, resumeToken, codexConfigProfile, model, effort, daemonOptOut, useLast } = input;
+  const repo = new RigRepository(db);
+  const launchPosture = repo.getNodePolicyProvenance(nodeId)?.launchPosture
+    ?? repo.getRigPolicyProvenance(rigId)?.launchPosture;
+  const binding = new NativePermissionStore(db).apply({
+    nodeId,
+    cwd: "",
+    ...(codexConfigProfile ? { codexConfigProfile } : {}),
+    ...(model ? { model } : {}),
+    ...(effort ? { effort } : {}),
+    ...(launchPosture ? { launchPosture } : {}),
+  } as NodeBinding, "codex");
+  const profileArg = codexConfigProfile ? ` -p ${shellQuote(codexConfigProfile)}` : "";
+  const envelopePostureArg = binding.codexPermissions
+    ? `${profileArg}${codexEnvelopeArgs(codexMemberEnvelope(binding.codexPermissions))}`
+    : undefined;
+  return buildCodexResumeCore(
+    resumeToken,
+    codexConfigProfile,
+    useLast,
+    undefined,
+    binding.launchPosture,
+    model,
+    envelopePostureArg,
+    daemonOptOut,
+    effort,
+  );
+}
+
+function computeResumeCommand(
+  db: Database.Database,
+  row: InventoryRow,
+  effort: string | null,
+  codexDaemonOptOut?: boolean,
+): string | null {
+  if (row.runtime === "codex" && row.resume_token) {
+    return computeCodexResumeCommand({
+      db,
+      nodeId: row.node_id,
+      rigId: row.rig_id,
+      resumeToken: row.resume_token,
+      codexConfigProfile: row.codex_config_profile,
+      model: row.model,
+      effort,
+      daemonOptOut: codexDaemonOptOut,
+    });
+  }
+  return buildNativeResumeCommand(row.runtime, row.resume_token, null, row.codex_config_profile, codexDaemonOptOut);
 }
 
 const CODEX_DAEMON_CHOICE_NOT_RECORDED = "Not recorded whether this seat's last managed launch used --no-daemon. If `codex --help` lists --no-daemon, "
   + "add it right after `codex`, as the managed launch does.";
 
 function computeRecoveryGuidance(input: {
+  db: Database.Database;
   runtime: string | null;
   resumeToken: string | null;
   cwd: string | null;
   sessionName: string | null;
   codexConfigProfile?: string | null;
+  nodeId: string;
+  rigId: string;
+  model?: string | null;
+  effort?: string | null;
   /** Codex: the current generation's recorded daemon choice; undefined when none was recorded. */
   codexDaemonOptOut?: boolean;
 }): NodeRecoveryGuidance | null {
-  const { runtime, resumeToken, cwd, sessionName, codexConfigProfile, codexDaemonOptOut } = input;
+  const { runtime, resumeToken, cwd, sessionName, codexConfigProfile, codexDaemonOptOut, nodeId, rigId, model, effort } = input;
 
   if (runtime === "claude-code") {
     const commands: string[] = [];
@@ -158,13 +225,15 @@ function computeRecoveryGuidance(input: {
 
     const daemonOptOut = codexDaemonOptOut === true;
     if (resumeToken) {
-      commands.push(buildCodexResumeCore(resumeToken, codexConfigProfile, undefined, undefined, undefined, undefined, undefined, daemonOptOut));
+      commands.push(computeCodexResumeCommand({ db: input.db, nodeId, rigId, resumeToken,
+        codexConfigProfile, model, effort, daemonOptOut }));
     }
     if (cwd) {
       commands.push(`cd ${cwd}`);
     }
     if (!resumeToken) {
-      commands.push(buildCodexResumeCore("", codexConfigProfile, true, undefined, undefined, undefined, undefined, daemonOptOut));
+      commands.push(computeCodexResumeCommand({ db: input.db, nodeId, rigId, resumeToken: "",
+        codexConfigProfile, model, effort, daemonOptOut, useLast: true }));
     }
 
     notes.push("Use workspace and recent prompt text to identify the right conversation.");
@@ -180,8 +249,8 @@ function computeRecoveryGuidance(input: {
 
     return {
       summary: resumeToken
-        ? "Try native Codex resume first; the managed launch sets the explicit -s workspace-write floor flag unless a named config profile is present."
-        : `No stored Codex resume token. Try codex${daemonOptOut ? " --no-daemon" : ""} -s workspace-write resume --last; the managed launch sets the explicit -s workspace-write floor flag unless a named config profile is present.`,
+        ? "Try native Codex resume first; the displayed command preserves this seat's resolved permission settings, model, effort, and config profile."
+        : `No stored Codex resume token. Try ${commands.at(-1)}; this command preserves this seat's resolved permission settings and config profile.`,
       commands,
       notes,
     };
@@ -790,7 +859,7 @@ function buildInventoryEntry(
     previousOccupant: row.previous_occupant,
     handoverAt: row.handover_at,
     tmuxAttachCommand: row.binding_attachment_type === "tmux" && row.session_name ? tmuxAttachCommand(row.session_name) : null,
-    resumeCommand: computeResumeCommand(row.runtime, row.resume_token, row.codex_config_profile, codexDaemonOptOuts.get(row.node_id)),
+    resumeCommand: computeResumeCommand(db, row, effortResolution.effective, codexDaemonOptOuts.get(row.node_id)),
     // OPR.0.4.0.26: recoveryGuidance is NOT inlined per node in the LIST
     // payload. It duplicated ~47KB of templated prose across all nodes and
     // no node-list consumer reads it. The full guidance is recomputed on
@@ -1077,11 +1146,16 @@ export function getNodeDetail(
     // single-node detail recomputes the full guidance from the entry's
     // resume fields (relocation of the per-node prose, not loss).
     recoveryGuidance: computeRecoveryGuidance({
+      db,
       runtime: entry.runtime,
       resumeToken: entry.resumeToken,
       cwd: entry.cwd,
       sessionName: entry.canonicalSessionName,
+      nodeId: entry.nodeId,
+      rigId: entry.rigId,
       codexConfigProfile: entry.codexConfigProfile,
+      model: entry.model,
+      effort: entry.effort,
       codexDaemonOptOut: entry.runtime === "codex" ? new AppliedLaunchObservationStore(db).readCurrent(nodeId)?.daemonOptOut : undefined,
     }),
     binding,

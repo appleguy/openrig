@@ -210,7 +210,7 @@ describe("Node Inventory Projection", () => {
     expect(entry?.recoveryGuidance).toBeNull(); // relocated to detail
     const detail = getNodeDetail(db, "rig-2", "dev.qa");
     expect(detail?.recoveryGuidance?.summary).toContain("codex -s workspace-write resume --last");
-    expect(detail?.recoveryGuidance?.summary).toContain("explicit -s workspace-write floor flag");
+    expect(detail?.recoveryGuidance?.summary).toContain("resolved permission settings");
     expect(detail?.recoveryGuidance?.commands).toEqual(["cd /workspace/app", "codex -s workspace-write resume --last"]);
     expect(detail?.recoveryGuidance?.notes).toContain("Use workspace and recent prompt text to identify the right conversation.");
     expect(detail?.recoveryGuidance?.notes).toContain("If the identity anchor was captured, the picker may include: dev-qa@test-rig");
@@ -236,6 +236,38 @@ describe("Node Inventory Projection", () => {
     expect(detail?.codexConfigProfile).toBe("sysadmin");
     expect(detail?.recoveryGuidance?.commands).toContain("codex -p 'sysadmin' resume 'sess-456'");
     expect(detail?.recoveryGuidance?.notes).toContain("Preserve Codex config profile: sysadmin");
+  });
+
+  it("Codex resume and recovery commands follow the seat's resolved full_bypass posture and preserve model and effort", () => {
+    db.prepare("INSERT INTO rigs (id, name, permission_policy, rig_policy_origin, rig_policy_launch_posture) VALUES (?, ?, ?, ?, ?)")
+      .run("rig-yolo", "codex-yolo", "builtin:yolo", "builtin", "full_bypass");
+    db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, ?, ?)").run("pod-yolo", "rig-yolo", "dev", "Dev");
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, model, effort, pod_id, agent_ref, profile) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run("node-yolo", "rig-yolo", "dev.agent", "codex", "gpt-5-codex", "high", "pod-yolo", "local:agents/agent", "default");
+    seedSession(db, "node-yolo", "dev-agent@codex-yolo", { resumeType: "codex_id", resumeToken: "thread-123" });
+
+    const entry = getNodeInventory(db, "rig-yolo").find((node) => node.logicalId === "dev.agent");
+    const detail = getNodeDetail(db, "rig-yolo", "dev.agent");
+    const command = "codex -s danger-full-access -a never -m 'gpt-5-codex' -c 'model_reasoning_effort=\"high\"' resume 'thread-123'";
+    expect(entry?.resumeCommand).toBe(command);
+    expect(detail?.recoveryGuidance?.commands).toContain(command);
+    expect(detail?.recoveryGuidance?.summary).toContain("resolved permission settings");
+  });
+
+  it("Codex resume uses the saved member envelope and named profile", () => {
+    db.prepare("INSERT INTO rigs (id, name, permission_policy, rig_policy_origin, rig_policy_launch_posture) VALUES (?, ?, ?, ?, ?)")
+      .run("rig-yolo", "codex-yolo", "builtin:yolo", "builtin", "full_bypass");
+    db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, ?, ?)").run("pod-yolo", "rig-yolo", "dev", "Dev");
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, codex_config_profile, pod_id, agent_ref, profile, codex_permissions_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run("node-envelope", "rig-yolo", "dev.agent", "codex", "sysadmin", "pod-yolo", "local:agents/agent", "default",
+        JSON.stringify({ sandbox: "workspace-write", approval: "never", network_access: false }));
+    seedSession(db, "node-envelope", "dev-agent@codex-yolo", { resumeType: "codex_id", resumeToken: "thread-envelope" });
+
+    const entry = getNodeInventory(db, "rig-yolo").find((node) => node.logicalId === "dev.agent");
+    const detail = getNodeDetail(db, "rig-yolo", "dev.agent");
+    const command = "codex -p 'sysadmin' -s workspace-write -a never -c 'sandbox_workspace_write.writable_roots=[]' -c 'sandbox_workspace_write.network_access=false' -c 'sandbox_workspace_write.exclude_tmpdir_env_var=false' -c 'sandbox_workspace_write.exclude_slash_tmp=false' resume 'thread-envelope'";
+    expect(entry?.resumeCommand).toBe(command);
+    expect(detail?.recoveryGuidance?.commands).toContain(command);
   });
 
   // Test 7: startupStatus reflects session startup_status column
