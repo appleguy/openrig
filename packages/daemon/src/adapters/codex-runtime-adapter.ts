@@ -1,4 +1,7 @@
 import { codexEnvelopeArgs } from "../domain/codex-rebuild-permissions.js";
+import { CodexGoalClient, GoalControlError, type GoalChange } from "./codex-goal-client.js";
+import type { Binding } from "../domain/types.js";
+import { codexCommandRemote } from "../domain/native-process-lineage.js";
 import { codexMemberEnvelope, observeCodexEnvelope, readProfileFingerprint, type CodexProfileObservation, type ProfileFingerprint } from "../domain/codex-member-permissions.js";
 import { operationalLaunchArg } from "./kernel-authority.js";
 import nodePath from "node:path";
@@ -26,9 +29,11 @@ import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-plann
 import { observeCodexSandbox, type AppliedLaunchObservation } from "../domain/permission-drift.js";
 import {
   defaultResolveHomeDirByPid,
+  defaultResolveCodexProcessEnvironmentByPid,
   CodexThreadIdResolver,
   lstartToMinTs,
   readCodexThreadIdFromCandidateHomes,
+  type ResolveCodexProcessEnvironmentByPid,
   type ResolveHomeDirByPid,
 } from "../domain/codex-thread-id.js";
 import { assessNativeResumeProbe, buildCodexResumeCore, hasCodexUpdateHeader, type NativeResumeProbeResult } from "../domain/native-resume-probe.js";
@@ -49,10 +54,10 @@ import {
 } from "../domain/codex-core-plugin-install.js";
 
 /** Runs Codex's own CLI with the daemon's CODEX_HOME; tests inject a recorder. */
-export type CodexCliRunner = (args: string[], env: NodeJS.ProcessEnv) => Promise<{ status: number | null; stdout: string; stderr: string }>;
+export type CodexCliRunner = (args: string[], env: NodeJS.ProcessEnv, timeoutMs?: number) => Promise<{ status: number | null; stdout: string; stderr: string }>;
 
-const defaultCodexCli: CodexCliRunner = (args, env) => new Promise((resolve) => {
-  execFile("codex", args, { env, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
+const defaultCodexCli: CodexCliRunner = (args, env, timeoutMs = 120_000) => new Promise((resolve) => {
+  execFile("codex", args, { env, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
     const status = error ? (typeof (error as { code?: unknown }).code === "number" ? (error as { code: number }).code : null) : 0;
     // A spawn failure (ENOENT, EACCES) has no exit code and empty output: keep its message as the reason.
     const err = String(stderr ?? "");
@@ -143,6 +148,58 @@ const RESUME_EXTENDED_SLEEP_MS = 500;
  */
 export class CodexRuntimeAdapter implements RuntimeAdapter {
   readonly runtime = "codex";
+  // Only serialize the read/compare/mutate boundary, never retain goal state here.
+  private goalOperations = new Map<string, Promise<void>>();
+  async controlGoal(input: { binding: Binding; threadId: string; socketPath: string; change: GoalChange; beforeMutation: () => Promise<void> }) {
+    const target = input.binding.tmuxPane;
+    if (!target) throw new GoalControlError("goal_identity_unverified", "A bound tmux pane is required");
+    const observe = () => verifyCodexPaneProcess({ target, tmux: this.tmux, listProcesses: this.listProcesses,
+      expectedToken: input.threadId, requireResume: true });
+    const native = await observe();
+    if (!native) throw new GoalControlError("goal_identity_unverified", "The bound foreground process does not prove this exact resumed thread");
+    const remote = codexCommandRemote(native.process.command);
+    if (!remote?.startsWith("unix://")) throw new GoalControlError("goal_endpoint_unverified", "Goal control requires one explicit Unix --remote option before resume on the verified client");
+    let socket = remote.slice(7);
+    if (!socket) {
+      // Ask Codex for its managed endpoint under the TARGET process's home, never the daemon's home.
+      const targetEnv = await this.resolveCodexProcessEnvironmentByPid(native.process.pid);
+      const home = targetEnv?.home;
+      if (!home || !nodePath.isAbsolute(home)) throw new GoalControlError("goal_endpoint_unverified", "The target process home is unknown");
+      const codexHome = targetEnv.codexHome || nodePath.join(home, ".codex");
+      if (!nodePath.isAbsolute(codexHome)) throw new GoalControlError("goal_endpoint_unverified", "The target process CODEX_HOME is not absolute");
+      const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, CODEX_HOME: codexHome, ...(this.launchPath ? { PATH: this.launchPath } : {}) };
+      delete env.CODEX_APP_SERVER_SOCKET;
+      const metadata = await this.runCodexCli(["app-server", "daemon", "version"], env, 3000);
+      let version: { status?: string; socketPath?: string; cliVersion?: string; appServerVersion?: string };
+      try { version = JSON.parse(metadata.stdout); } catch { throw new GoalControlError("goal_endpoint_unverified", "Codex managed endpoint metadata is unreadable"); }
+      if (metadata.status !== 0 || version.status !== "running" || !version.cliVersion || version.cliVersion !== version.appServerVersion
+        || !version.socketPath || !nodePath.isAbsolute(version.socketPath) || version.socketPath !== input.socketPath) {
+        throw new GoalControlError("goal_endpoint_unverified", "Codex did not verify the target process's running managed endpoint and matching version");
+      }
+      socket = version.socketPath;
+    }
+    if (!nodePath.isAbsolute(socket) || socket !== input.socketPath) throw new GoalControlError("goal_endpoint_unverified", "The supplied socket does not match the verified client's endpoint");
+    const check = async () => {
+      await input.beforeMutation();
+      if ((await observe())?.fingerprint !== native.fingerprint) throw new GoalControlError("goal_identity_changed", "The target process changed before goal dispatch");
+    };
+    const key = `${socket}:${input.threadId}`;
+    const prior = this.goalOperations.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const tail = prior.then(() => held);
+    this.goalOperations.set(key, tail);
+    await prior;
+    try {
+      await check();
+      const client = await CodexGoalClient.connect(socket);
+      try { return await client.apply(input.threadId, input.change, check); }
+      finally { client.close(); }
+    } finally {
+      release();
+      if (this.goalOperations.get(key) === tail) this.goalOperations.delete(key);
+    }
+  }
   private tmux: TmuxAdapter;
   private seatLaunchEnvironment?: SeatLaunchEnvironment;
   private fs: CodexAdapterFsOps;
@@ -153,6 +210,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private readinessSettings?: Pick<SettingsStore, "resolveOne">;
   private sleep: (ms: number) => Promise<void>;
   private resolveHomeDirByPid: ResolveHomeDirByPid;
+  private resolveCodexProcessEnvironmentByPid: ResolveCodexProcessEnvironmentByPid;
   private codexHome?: string;
   /** A seat's own CODEX_HOME from its member or rig `env:`, when it declares one. */
   private seatHome?: (nodeId: string) => string | undefined;
@@ -210,6 +268,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     resumeProofWindowMs?: number;
     readinessSettings?: Pick<SettingsStore, "resolveOne">;
     resolveHomeDirByPid?: ResolveHomeDirByPid;
+    resolveCodexProcessEnvironmentByPid?: ResolveCodexProcessEnvironmentByPid;
     sleep?: (ms: number) => Promise<void>;
     activityRelayPath?: string;
     /** Explicit CODEX_HOME; absent preserves the legacy OS/PID home behavior. */
@@ -260,6 +319,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.activityRelayPath = deps.activityRelayPath;
     this.listProcesses = deps.listProcesses ?? defaultListProcesses;
     this.resolveHomeDirByPid = deps.resolveHomeDirByPid ?? defaultResolveHomeDirByPid;
+    this.resolveCodexProcessEnvironmentByPid = deps.resolveCodexProcessEnvironmentByPid ?? defaultResolveCodexProcessEnvironmentByPid;
     // A seat with its own CODEX_HOME logs its threads there, so each read names the home it searches.
     this.readThreadIdByPid = deps.readThreadIdByPid ?? ((pid, identity, home) => identity === undefined
       ? this.readThreadIdFromLogs(pid, home) : this.threadResolverFor(home).resolveForkChild(pid, identity));

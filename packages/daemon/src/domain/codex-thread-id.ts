@@ -28,8 +28,15 @@ export interface CodexThreadEvidence {
  *  caller awaits it, and the DEFAULT is async so the per-PID `ps eww` spawn no longer blocks the
  *  event loop (measured live: 28.9s/15min of burst blocking inside the 8-attempt capture loops). */
 export type ResolveHomeDirByPid = (pid: number) => Promise<string | undefined> | string | undefined;
+export interface CodexProcessEnvironment { home?: string; codexHome?: string }
+export type ResolveCodexProcessEnvironmentByPid = (pid: number) => Promise<CodexProcessEnvironment | undefined> | CodexProcessEnvironment | undefined;
 
-export async function defaultResolveHomeDirByPid(pid: number): Promise<string | undefined> {
+function environmentValue(output: string, name: string): string | undefined {
+  const match = output.match(new RegExp(`(?:^|\\s)${name}=(.*?)(?=\\s[A-Za-z_][A-Za-z0-9_]*=|$)`));
+  return match?.[1] || undefined;
+}
+
+export async function defaultResolveCodexProcessEnvironmentByPid(pid: number): Promise<CodexProcessEnvironment | undefined> {
   try {
     // BSD/macOS `ps` supports `eww` to expose the full process environment.
     // If OpenRig grows a Linux daemon target, this likely needs a /proc-based path.
@@ -38,13 +45,18 @@ export async function defaultResolveHomeDirByPid(pid: number): Promise<string | 
       return stdout;
     })).trim();
     if (!output) return undefined;
-    // ps prints unquoted environment values; whitespace can belong to HOME.
+    // ps prints unquoted environment values; whitespace can belong to either path.
     // Stop at the next environment assignment rather than the first space.
-    const match = output.match(/(?:^|\s)HOME=(.*?)(?=\s[A-Za-z_][A-Za-z0-9_]*=|$)/);
-    return match?.[1] || undefined;
+    const home = environmentValue(output, "HOME");
+    const codexHome = environmentValue(output, "CODEX_HOME");
+    return home || codexHome ? { ...(home ? { home } : {}), ...(codexHome ? { codexHome } : {}) } : undefined;
   } catch {
     return undefined;
   }
+}
+
+export async function defaultResolveHomeDirByPid(pid: number): Promise<string | undefined> {
+  return (await defaultResolveCodexProcessEnvironmentByPid(pid))?.home;
 }
 
 export function readCodexThreadIdFromCandidateHomes(

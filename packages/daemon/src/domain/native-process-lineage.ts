@@ -215,6 +215,21 @@ export function codexCommandResumeToken(command: string): string | null | undefi
   return codexConversationToken(tokens(command).slice(1), "resume");
 }
 
+/** A single pre-subcommand remote option. Prompt text and option values never become transport proof.
+ * Goal control deliberately requires this unambiguous spelling, even when Codex accepts later options. */
+export function codexCommandRemote(command: string): string | null {
+  const argv = tokens(command).slice(1);
+  const values: string[] = [];
+  for (let index = 0; index < argv.length;) {
+    const arg = argv[index]!;
+    if (arg === "--" || !arg.startsWith("-")) break;
+    if (arg === "--remote") values.push(argv[index + 1] ?? "");
+    else if (arg.startsWith("--remote=")) values.push(arg.slice(9));
+    index = codexOptionEnd(argv, index);
+  }
+  return values.length === 1 && values[0] ? values[0] : null;
+}
+
 type ClaudeArgvIds = { resume: string | null; "session-id": string | null };
 
 // OPR.0.7.0.9: a seat's launch additions, read the same way by both selectors. The options OpenRig already emitted

@@ -54,6 +54,26 @@ function makeCommand(deps: StatusDeps): Command {
   return program;
 }
 
+describe("seat goal", () => {
+  it("sends status-only changes with explicit thread/socket and no objective replacement", async () => {
+    const paths: string[] = [], bodies: unknown[] = [];
+    const deps = makeDeps({ status: 200, data: { ok: true } }, paths, bodies);
+    const output = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "goal", "set", "audit-lead@kernel",
+      "--thread", "exact-thread", "--socket", "/target/rpc.sock", "--status", "active", "--json"]).then(() => {}));
+    expect(output.exitCode).toBeUndefined();
+    expect(paths).toEqual(["/api/seat/goal/audit-lead%40kernel"]);
+    expect(bodies).toEqual([{ operation: "set", threadId: "exact-thread", socketPath: "/target/rpc.sock", status: "active" }]);
+  });
+  it("preserves full multiline stdin objectives", async () => {
+    const paths: string[] = [], bodies: unknown[] = [];
+    const deps = { ...makeDeps({ status: 200, data: { ok: true } }, paths, bodies), readStdin: async () => "full goal\nsecond line\n" };
+    const program = new Command(); program.addCommand(seatCommand(deps));
+    await captureLogs(() => program.parseAsync(["node", "rig", "seat", "goal", "set", "audit-lead@kernel",
+      "--thread", "exact-thread", "--socket", "/target/rpc.sock", "--status", "paused", "--objective-stdin"]).then(() => {}));
+    expect(bodies[0]).toMatchObject({ objective: "full goal\nsecond line\n" });
+  });
+});
+
 async function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; errors: string[]; exitCode: number | undefined }> {
   const logs: string[] = [];
   const errors: string[] = [];

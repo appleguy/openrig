@@ -8,6 +8,8 @@ import type { EventBus } from "../domain/event-bus.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { observeClaudePaneStartedAt } from "../domain/native-process-lineage.js";
 import { SeatStatusService } from "../domain/seat-status-service.js";
+import { SeatGoalService } from "../domain/seat-goal-service.js";
+import { GoalControlError } from "../adapters/codex-goal-client.js";
 import { SeatHandoverService } from "../domain/seat-handover-service.js";
 import { SeatRuntimeSwitchService, runtimeSwitchSummary } from "../domain/seat-runtime-switch-service.js";
 import type { QueueRepository } from "../domain/queue-repository.js";
@@ -37,6 +39,20 @@ seatRoutes.use("*", async (c, next) => {
   const refusal = rigRepo ? runtimeSwitchCustodyRefusal(rigRepo.db, transportSenderSession(c), c.req.header(OCCUPANT_GENERATION_HEADER)) : null;
   if (refusal) return c.json(refusal.body, refusal.status);
   return next();
+});
+
+// POST even for get: explicit endpoint/thread inputs never come from daemon-global defaults.
+seatRoutes.post("/goal/:seatRef", async c => {
+  try {
+    const service = new SeatGoalService({ rigRepo: c.get("rigRepo" as never) as RigRepository,
+      sessionRegistry: c.get("sessionRegistry" as never) as SessionRegistry,
+      runtimeAdapters: c.get("runtimeAdapters" as never) as Record<string, import("../domain/runtime-adapter.js").RuntimeAdapter> | undefined });
+    return c.json(await service.control(c.req.param("seatRef"), await c.req.json().catch(() => null)));
+  } catch (error) {
+    if (error instanceof GoalControlError) return c.json({ ok: false, code: error.code, message: error.message, outcomeUnknown: error.outcomeUnknown },
+      error.code === "goal_input_invalid" ? 400 : error.code === "seat_not_found" ? 404 : error.code === "goal_outcome_unknown" ? 502 : 409);
+    return c.json({ ok: false, code: "goal_transport_failed", message: (error as Error).message }, 502);
+  }
 });
 
 // S09 is an independent delivery preference, never a lifecycle or permission change.

@@ -213,6 +213,12 @@ export interface ForkSource {
  * to the startup orchestrator after checkReady().
  */
 export interface RuntimeAdapter {
+  /** Native goal control on a verified existing occupant; unsupported runtimes omit it. */
+  controlGoal?(input: {
+    binding: Binding; threadId: string; socketPath: string;
+    change: import("../adapters/codex-goal-client.js").GoalChange;
+    beforeMutation: () => Promise<void>;
+  }): Promise<{ goal: import("../adapters/codex-goal-client.js").NativeGoal | null; changed: boolean }>;
   /** Claude's managed capability/launch seam, shared with seat selection. */
   readonly claudeManagedLaunch?: import("./claude-managed-launch.js").ClaudeManagedLaunch;
   readonly runtime: string;

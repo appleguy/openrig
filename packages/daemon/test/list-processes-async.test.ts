@@ -67,10 +67,10 @@ describe.each(SITES)("B12-T real async list_processes — %s", (_site, listProce
 // own env on this platform (measured: 21-byte output, no env), so asserting on process.pid is
 // environment-hostage; a child we spawn with an explicit env is deterministic.
 describe("F1 real async resolve_home — codex-thread-id", () => {
-  async function withChild<T>(fn: (pid: number) => Promise<T>, home = "/tmp/f1-probe-home"): Promise<T> {
+  async function withChild<T>(fn: (pid: number) => Promise<T>, home = "/tmp/f1-probe-home", codexHome?: string): Promise<T> {
     const { spawn } = await import("node:child_process");
     const child = spawn(process.execPath, ["-e", "console.log('ready'); setTimeout(() => {}, 15000)"], {
-      env: { HOME: home, PATH: process.env.PATH ?? "", OPENRIG_TEST_END: "marker" },
+      env: { HOME: home, ...(codexHome ? { CODEX_HOME: codexHome } : {}), PATH: process.env.PATH ?? "", OPENRIG_TEST_END: "marker" },
       stdio: ["ignore", "pipe", "ignore"],
     });
     try {
@@ -95,6 +95,13 @@ describe("F1 real async resolve_home — codex-thread-id", () => {
     const { defaultResolveHomeDirByPid } = await import("../src/domain/codex-thread-id.js");
     const home = "/tmp/openrig profile home with spaces";
     expect(await withChild((pid) => defaultResolveHomeDirByPid(pid), home)).toBe(home);
+  });
+
+  it("resolves both HOME and a seat-specific CODEX_HOME from the real target process environment", async () => {
+    const { defaultResolveCodexProcessEnvironmentByPid } = await import("../src/domain/codex-thread-id.js");
+    const home = "/tmp/openrig process home with spaces";
+    const codexHome = "/tmp/openrig seat state with spaces";
+    expect(await withChild((pid) => defaultResolveCodexProcessEnvironmentByPid(pid), home, codexHome)).toEqual({ home, codexHome });
   });
 
   it("hands control back to the event loop instead of blocking for the spawn (RED on the pre-F1 sync implementation)", async () => {

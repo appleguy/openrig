@@ -391,10 +391,31 @@ export function seatCommand(depsOverride?: SeatDeps & { readStdin?: () => Promis
     const deps = getDeps(); const daemon = await getDaemonStatus(deps.lifecycleDeps);
     if (!daemonStatusGuard(daemon)) return;
     const client = deps.clientFactory(getDaemonUrl(daemon));
-    const result = method === "GET" ? await client.get<Record<string, unknown>>(path) : await client.post<Record<string, unknown>>(path, body ?? {});
+    const result = method === "GET" ? await client.get<Record<string, unknown>>(path) : await client.post<Record<string, unknown>>(path, body ?? {},
+      path.startsWith("/api/seat/goal/") ? { timeoutMs: 30_000 } : undefined);
     console.log(JSON.stringify(result.data, null, json ? undefined : 2));
     if (result.status >= 400) process.exitCode = result.status >= 500 ? 2 : 1;
   };
+  const goal = cmd.command("goal").description("Read or control a verified Codex seat's native goal; active set may schedule work");
+  for (const operation of ["get", "set", "clear"] as const) {
+    const action = goal.command(operation).argument("<seat>")
+      .requiredOption("--thread <uuid>", "Exact existing native thread UUID")
+      .requiredOption("--socket <path>", "Explicit existing Unix app-server socket (checked against target client)")
+      .option("--json", "JSON output");
+    if (operation === "set") action.requiredOption("--status <status>", "active, paused, blocked, usageLimited, budgetLimited or complete")
+      .option("--objective <text>", "Replace the objective; omitted preserves it")
+      .option("--objective-stdin", "Read the complete replacement objective from stdin");
+    action.action(async (seat: string, opts: { thread: string; socket: string; status?: string; objective?: string; objectiveStdin?: boolean; json?: boolean }) => {
+      if (opts.objective !== undefined && opts.objectiveStdin) {
+        console.error("Choose --objective or --objective-stdin"); process.exitCode = 1; return;
+      }
+      const objective = opts.objectiveStdin ? await readStdin() : opts.objective;
+      await guardRequest("POST", `/api/seat/goal/${encodeURIComponent(seat)}`, {
+        operation, threadId: opts.thread, socketPath: opts.socket,
+        ...(operation === "set" ? { status: opts.status, ...(objective === undefined ? {} : { objective }) } : {}),
+      }, opts.json);
+    });
+  }
   cmd.command("history")
     .requiredOption("--rig <id>", "Exact rig ID")
     .requiredOption("--node-id <id>", "Exact durable node ID")
