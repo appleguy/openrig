@@ -29,7 +29,7 @@ export class SeatGoalService {
     if (!adapter?.controlGoal) throw new GoalControlError("goal_unsupported", "This seat's runtime has no native goal-control adapter");
     const binding = node && this.deps.sessionRegistry.getBindingForNode(node.id);
     if (!binding?.tmuxPane || binding.tmuxSession !== entry.canonicalSessionName || entry.sessionStatus !== "running"
-      || entry.resumeType !== "codex" || entry.resumeToken !== body.threadId) {
+      || entry.resumeType !== "codex_id" || entry.resumeToken !== body.threadId) {
       throw new GoalControlError("goal_identity_unverified", "The live seat binding and saved thread do not match the supplied threadId");
     }
     const beforeMutation = async () => {

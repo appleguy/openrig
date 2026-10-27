@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 
@@ -13,8 +13,9 @@ describe("native seat goal route", () => {
   const node = setup.rigRepo.addNode(rig.id, "audit.lead", { runtime: "codex" });
   const session = setup.sessionRegistry.registerSession(node.id, "audit-lead@goal-test");
   setup.sessionRegistry.updateStatus(session.id, "running");
-  setup.sessionRegistry.updateResumeToken(session.id, "codex", threadId, "operator");
+  setup.sessionRegistry.updateResumeToken(session.id, "codex_id", threadId, "operator");
   setup.sessionRegistry.updateBinding(node.id, { tmuxSession: "audit-lead@goal-test", tmuxPane: "%1" });
+  beforeEach(() => { setup.sessionRegistry.updateResumeToken(session.id, "codex_id", threadId, "operator"); });
   afterEach(() => { controlGoal.mockClear(); });
   const post = (body: unknown) => setup.app.request("/api/seat/goal/audit-lead%40goal-test", { method: "POST",
     headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -26,6 +27,11 @@ describe("native seat goal route", () => {
   it("refuses stale occupant and malformed requests before adapter dispatch", async () => {
     expect((await post({ operation: "clear", threadId: "01a179a1-0000-0000-0000-000000000000", socketPath: "/target/rpc.sock" })).status).toBe(409);
     expect((await post({ operation: "set", threadId, socketPath: "/target/rpc.sock", status: "bogus" })).status).toBe(400);
+    expect(controlGoal).not.toHaveBeenCalled();
+  });
+  it("refuses a non-Codex resume type before adapter dispatch", async () => {
+    setup.sessionRegistry.updateResumeToken(session.id, "claude_id", threadId, "operator");
+    expect((await post({ operation: "get", threadId, socketPath: "/target/rpc.sock" })).status).toBe(409);
     expect(controlGoal).not.toHaveBeenCalled();
   });
 });
