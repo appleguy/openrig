@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createMcpServer } from "../src/mcp-server.js";
+import { createMcpServer, MEMBER_WORKFLOW, MEMBER_WORKFLOW_VERSION, type McpAccess } from "../src/mcp-server.js";
 import { DaemonClient, DaemonConnectionError, type DaemonResponse } from "../src/client.js";
 
 function mockClient(overrides?: {
@@ -362,7 +362,7 @@ describe("MCP Server", () => {
   it("rig_queue_show names where a handed-on item went, and says when it can't tell", async () => {
     const lists: string[] = [];
     const getFn = vi.fn(async (path: string) => {
-      if (path === "/api/queue/qitem-remote") return { status: 200, data: { qitemId: "qitem-remote", state: "handed-off", closureReason: "handed_off_to", closureTarget: "qitem-20261023-abc@mm2-host" } };
+      if (path === "/api/queue/qitem-remote") return { status: 200, data: { qitemId: "qitem-remote", state: "handed-off", closureReason: "handed_off_to", closureTarget: "qitem-remote-successor@mm2-host" } };
       if (path === "/api/queue/qitem-done") return { status: 200, data: { qitemId: "qitem-done", state: "done", closureReason: "handed_off_to", closureTarget: "qa@team" } };
       if (path === "/api/queue/qitem-old") return { status: 200, data: { qitemId: "qitem-old", state: "handed-off", closureReason: "handed_off_to", closureTarget: "qa@team" } };
       if (path.endsWith("/transitions")) return { status: 200, data: [] };
@@ -381,7 +381,7 @@ describe("MCP Server", () => {
     const successor = async (qitemId: string) => ((await mcpClient.callTool({ name: "rig_queue_show", arguments: { qitemId } })).structuredContent as { successor: unknown }).successor;
 
     // A cross-host handoff is named from its closure target, not fetched.
-    expect(await successor("qitem-remote")).toEqual({ qitemId: "qitem-20261023-abc", host: "mm2-host" });
+    expect(await successor("qitem-remote")).toEqual({ qitemId: "qitem-remote-successor", host: "mm2-host" });
     expect(lists).toEqual([]);
     // A handoff-and-complete closes the source done, and it still has a successor: the newest, with the others named.
     expect(await successor("qitem-done")).toEqual({ qitemId: "qitem-next", destinationSession: "qa@team", state: "pending", otherSuccessors: ["qitem-earlier"] });
@@ -528,6 +528,33 @@ describe("MCP Server", () => {
     expect(instructions).toContain("reserved for a person");
     expect(instructions).toContain("beside their answers and never as one");
     await cleanup();
+  });
+
+  it("carries the member workflow as one versioned text, quoted word for word in the hosted-members doc", async () => {
+    await setup();
+    const instructions = mcpClient.getInstructions() ?? "";
+    expect(MEMBER_WORKFLOW).toContain(`(${MEMBER_WORKFLOW_VERSION})`);
+    expect(instructions).toContain(MEMBER_WORKFLOW);
+    // The inbox, the claim before work, and keeping an item blocked while a person is asked.
+    for (const part of ["rig_queue_list with owned set", "rig_queue_claim", "blockedOn that person", "blockedOn that new qitemId"]) expect(MEMBER_WORKFLOW).toContain(part);
+    const doc = fs.readFileSync(new URL("../../../docs/reference/hosted-members.md", import.meta.url), "utf8");
+    expect(doc).toContain(`> ${MEMBER_WORKFLOW}`);
+    await cleanup();
+  });
+
+  it("doesn't give an external caller's connection the member workflow or its authority, only the shared lines", async () => {
+    const server = createMcpServer(mockClient(), { seat: "cus-1-caller@team",
+      access: { principal: "cus-1", owner: false, rigs: ["team"], roots: [], workspace: false, external: { objects: { queue: ["create", "show", "list"] } } } });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const external = new Client({ name: "external-client", version: "1.0.0" });
+    await server.connect(serverTransport);
+    await external.connect(clientTransport);
+    const instructions = external.getInstructions() ?? "";
+    expect(instructions).toContain("reserved for a person");
+    expect(instructions).not.toContain(MEMBER_WORKFLOW_VERSION);
+    expect(instructions).not.toContain("basically authorized");
+    await external.close();
+    await server.close();
   });
 
   it("rig_down calls POST /api/down with correct params", async () => {
@@ -999,6 +1026,54 @@ describe("MCP Server", () => {
       expect(body.qitemId).toMatch(/^qitem-\d{14}-[0-9a-f]{16}$/);
       expect(body).not.toHaveProperty("sourceSession");
       await cleanup();
+    });
+
+    it("rig_queue_create drops OpenRig's provenance tags only from an external caller's create and revision; other callers' pass as sent", async () => {
+      const sent = ["mission:m", "project:p", "custom", "workflow", "founder-slack", "inbound", "shared-channel", "participant:acme", "slack-body:0123456789abcdef", "slack-attachments:39", "gate"];
+      const tagsSent = async (access?: McpAccess, revises?: string) => {
+        const postFn = vi.fn(async () => ({ status: 201, data: { qitemId: "qitem-1" } }));
+        const getFn = vi.fn(async () => ({ status: 200, data: { qitemId: "qitem-0", sourceSession: "cus-a1-caller@team", destinationSession: "lead@team" } }));
+        const server = createMcpServer(mockClient({ post: postFn, get: getFn }), { seat: "cus-a1-caller@team", access });
+        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+        const client = new Client({ name: "test-client", version: "1.0.0" });
+        await server.connect(serverTransport);
+        await client.connect(clientTransport);
+        const result = await client.callTool({ name: "rig_queue_create", arguments: { destination: "lead@team", body: "Do X", tags: sent, ...(revises ? { revises } : {}) } });
+        await client.close();
+        await server.close();
+        expect(result.isError).toBeUndefined();
+        return (postFn.mock.calls[0] as unknown as [string, Record<string, unknown>])[1].tags;
+      };
+      const work: McpAccess = { principal: "grok", owner: false, rigs: ["team"], roots: [], workspace: false };
+      const external: McpAccess = { ...work, principal: "cus_A1", external: { objects: { queue: ["create", "show", "list"] } } };
+      expect(await tagsSent()).toEqual(sent);
+      expect(await tagsSent(work)).toEqual(sent);
+      expect(await tagsSent(external)).toEqual(["mission:m", "project:p", "custom", "workflow"]);
+      expect(await tagsSent(external, "qitem-0")).toEqual(["mission:m", "project:p", "custom", "workflow"]);
+    });
+
+    it("rig_queue_create: an external caller hands tasks only to its team, never to a caller-shaped seat (itself included); a self-hosted grant is unchanged", async () => {
+      const created = async (access: McpAccess, destination: string, revises?: string) => {
+        const postFn = vi.fn(async () => ({ status: 201, data: { qitemId: "qitem-1" } }));
+        const getFn = vi.fn(async () => ({ status: 200, data: { qitemId: "qitem-0", sourceSession: "cus-a1-caller@team", destinationSession: "lead@team" } }));
+        const server = createMcpServer(mockClient({ post: postFn, get: getFn }), { seat: "cus-a1-caller@team", access });
+        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+        const client = new Client({ name: "test-client", version: "1.0.0" });
+        await server.connect(serverTransport);
+        await client.connect(clientTransport);
+        const result = await client.callTool({ name: "rig_queue_create", arguments: { destination, body: "Do X", ...(revises ? { revises } : {}) } });
+        await client.close();
+        await server.close();
+        return { posted: postFn.mock.calls.length, refused: (result.structuredContent as { code?: string } | undefined)?.code === "out_of_scope" };
+      };
+      const work: McpAccess = { principal: "grok", owner: false, rigs: ["team"], roots: [], workspace: false };
+      const external: McpAccess = { ...work, principal: "cus_A1", external: { objects: { queue: ["create", "show", "list"] } } };
+      for (const destination of ["cus-a1-caller@team", "cus-b2-caller@team"]) {
+        expect(await created(external, destination)).toEqual({ posted: 0, refused: true });
+        expect(await created(external, destination, "qitem-0")).toEqual({ posted: 0, refused: true });
+        expect(await created(work, destination)).toEqual({ posted: 1, refused: false });
+      }
+      expect(await created(external, "lead@team")).toEqual({ posted: 1, refused: false });
     });
 
     it("rig_queue_create sends humanAlert only when alert is set, so an MCP-only agent can still raise a sign-in", async () => {

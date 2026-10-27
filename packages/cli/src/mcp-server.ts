@@ -57,7 +57,8 @@ function structured(data: unknown): Record<string, unknown> {
  *  fetched); a local successor is the item whose handedOffFrom is this one, the newest when there are several. null when
  *  none is found; { unknown: true, code } when the lookup failed or the daemon can't filter by handedOffFrom. */
 async function successorOf(client: DaemonClient, qitemId: string, closureTarget: unknown,
-  /** For a customer: which successor rows it may see; a cross-host successor's parties are unknown here, so it can't. */
+  /** For an external caller: which successor rows it may see; a cross-host successor's parties are unknown here, so it
+   *  can't. */
   visible?: (row: unknown) => boolean): Promise<Record<string, unknown> | null> {
   const remote = typeof closureTarget === "string" ? /^(qitem-[^@]+)@([^@]+)$/.exec(closureTarget) : null;
   if (remote) return visible ? { unknown: true, code: "out_of_scope" } : { qitemId: remote[1], host: remote[2] };
@@ -212,27 +213,27 @@ type Scope = {
   paths: boolean;
   /** Whether every list is limited to the caller's own items. */
   ownListsOnly: boolean;
-  /** For a customer: whether a party a row names (a handoff's new owner, a closure target, a blocker) may be shown. Every
-   *  row a customer receives goes through projectForCustomer, and successors are checked whole (successorOf). Absent for
-   *  every other caller, whose responses are as they were. */
+  /** For an external caller: whether a party a row names (a handoff's new owner, a closure target, a blocker) may be
+   *  shown. Every row an external caller receives goes through projectForExternal, and successors are checked whole
+   *  (successorOf). Absent for every other caller, whose responses are as they were. */
   shows?: (party: unknown) => boolean;
-  /** For a customer: whether a seat named inside a transition note may stay (its own seat and its team's). */
+  /** For an external caller: whether a seat named inside a transition note may stay (its own seat and its team's). */
   names?: (seat: string) => boolean;
 };
 
-type CustomerView = { shows: (party: unknown) => boolean; names: (seat: string) => boolean };
+type ExternalView = { shows: (party: unknown) => boolean; names: (seat: string) => boolean };
 
-/** The customer projection's predicates, for a customer's scope only; null for every other caller. */
-function customerView(scope: Scope | null): CustomerView | null {
+/** The external projection's predicates, for an external caller's scope only; null for every other caller. */
+function externalView(scope: Scope | null): ExternalView | null {
   return scope?.shows && scope.names ? { shows: scope.shows, names: scope.names } : null;
 }
 
 const ITEM_ID = /qitem-[A-Za-z0-9][A-Za-z0-9_-]*(?:@[A-Za-z0-9._-]+)?/g;
 const SEAT = /[A-Za-z0-9._-]+@[A-Za-z0-9._-]+(?:@[A-Za-z0-9._-]+)?/g;
 
-/** A transition note with every item id but the row's own, and every seat the customer may not see, replaced. Notes the
- *  daemon writes on a parked row name its blocker ("blocker <id> wake attempted", "auto-unparked: blocker <id> …"), and a
- *  team's note can name anyone. */
+/** A transition note with every item id but the row's own, and every seat the external caller may not see, replaced.
+ *  Notes the daemon writes on a parked row name its blocker ("blocker <id> wake attempted", "auto-unparked: blocker
+ *  <id> …"), and a team's note can name anyone. */
 function maskNote(note: string, ownId: unknown, names: (seat: string) => boolean): string {
   const ids: string[] = [];
   // Item ids first, set aside so a host-qualified id isn't read as a seat.
@@ -255,14 +256,14 @@ const OUT_OF_SCOPE_NOTE: Readonly<Record<string, string>> = {
 };
 
 /**
- * One projection for every row a customer receives (show's item and transitions, list rows, create's return). The row's
- * facts stay (state, closure reason); a party it names that the customer may not see goes, whatever put it there: a
- * handoff, a park, an escalation or a supersede. That is handedOffTo, the closure target (and the note of that closure,
- * which can name it), blockedOn, the daemon's custody advisory, the waiting view's blocker, liveness and backstop owners,
- * the pickup receipt's evidence, a transition's wake arrangement, and the names inside transition notes. The team's answer
- * (resolution) and the task's body are left as written.
+ * One projection for every row an external caller receives (show's item and transitions, list rows, create's return).
+ * The row's facts stay (state, closure reason); a party it names that the external caller may not see goes, whatever put
+ * it there: a handoff, a park, an escalation or a supersede. That is handedOffTo, the closure target (and the note of
+ * that closure, which can name it), blockedOn, the daemon's custody advisory, the waiting view's blocker, liveness and
+ * backstop owners, the pickup receipt's evidence, a transition's wake arrangement, and the names inside transition
+ * notes. The team's answer (resolution) and the task's body are left as written.
  */
-function projectForCustomer<T>(row: T, view: CustomerView): T {
+function projectForExternal<T>(row: T, view: ExternalView): T {
   if (!row || typeof row !== "object" || Array.isArray(row)) return row;
   const { shows, names } = view;
   const fields = { ...(row as Record<string, unknown>) };
@@ -279,7 +280,7 @@ function projectForCustomer<T>(row: T, view: CustomerView): T {
     }
   }
   if (fields.blockedOn != null && !shows(fields.blockedOn)) fields.blockedOn = null;
-  if (fields.closingTransition) fields.closingTransition = projectForCustomer(fields.closingTransition, view);
+  if (fields.closingTransition) fields.closingTransition = projectForExternal(fields.closingTransition, view);
   // The daemon's custody advisory names the target in its target and its message.
   const advisory = fields.handoffAdvisory as { target?: unknown } | null | undefined;
   if (advisory && typeof advisory === "object" && !shows(advisory.target)) delete fields.handoffAdvisory;
@@ -297,7 +298,7 @@ function projectForCustomer<T>(row: T, view: CustomerView): T {
 /** What an authenticated non-owner caller may reach: its own seat, its rigs' seats, the items they send or own (to read),
  *  the items they own (to change), and its shared roots. A person (<entityId>@external) is never in a non-owner's scope. */
 function scopeFor(access: McpAccess, seatOf: () => string | undefined): Scope {
-  if (access.customer) return customerScope(access, seatOf);
+  if (access.external) return externalScope(access, seatOf);
   const rigs = new Set(access.rigs);
   const session = (value: unknown): boolean => {
     if (typeof value !== "string" || !value) return false;
@@ -326,15 +327,23 @@ function scopeFor(access: McpAccess, seatOf: () => string | undefined): Scope {
   };
 }
 
-/** Cloud names a customer's caller seat cus-<id>-caller@<rig>. v1 marks no seat as a caller, so an item from a seat of
- *  this shape is never the team's question to a customer. The shape never grants anything. */
+/** The grant service names an external caller's seat cus-<id>-caller@<rig>. v1 marks no seat as a caller, so an item
+ *  from a seat of this shape is never the team's question to an external caller, and an external caller can't hand a
+ *  task to one. The shape never grants anything. */
 const CALLER_SHAPED = /^cus-.+-caller@[^@]+$/;
 
-/** A Cloud customer grant (openrig.cloud.grant/v1): a requester, narrower than a work grant. The grant's own seat is the
- *  only caller. It may hand tasks to its rigs' seats (never a person or another host's seat), read the items it sent and
- *  the team's questions to it (never team-internal or another caller's items), follow a handed-on item only where it
- *  came back to it, and read the artifacts of its own items under its named roots. */
-function customerScope(access: McpAccess, seatOf: () => string | undefined): Scope {
+/** OpenRig's own tags that decide what a person asked about a row sees of its body: what Slack ingestion records about where
+ *  the row came from and which parts of its body OpenRig wrote (the sender's channel, the attachments block, the body's
+ *  digest), and `gate`, which with `workflow` marks a workflow's internal sign-off so the person's post shows its summary in
+ *  place of the body. An external caller's create can't claim them; its other tags (`workflow` and
+ *  `workflow:`/`instance:` among them) are kept. */
+const OPENRIG_PROVENANCE_TAG = /^(?:founder-slack|inbound|shared-channel|gate)$|^participant:|^slack-/;
+
+/** An external grant (openrig.grant/v1): a requester, narrower than a work grant. The grant's own seat is the
+ *  only caller. It may hand tasks to its rigs' team seats (never a caller-shaped seat, a person or another host's
+ *  seat), read the items it sent and the team's questions to it (never team-internal or another caller's items), follow
+ *  a handed-on item only where it came back to it, and read the artifacts of its own items under its named roots. */
+function externalScope(access: McpAccess, seatOf: () => string | undefined): Scope {
   const rigs = new Set(access.rigs);
   const caller = (value: unknown): boolean => typeof value === "string" && value !== "" && value === seatOf();
   // A seat of one of its rigs on this instance: member@rig, never a person or another host's seat.
@@ -353,7 +362,8 @@ function customerScope(access: McpAccess, seatOf: () => string | undefined): Sco
     owner: () => false,
     rig: (name) => typeof name === "string" && rigs.has(name),
     root: (name) => typeof name === "string" && access.roots.includes(name),
-    destination: member,
+    // A task goes to the team: never to the caller itself or to another caller-shaped seat, which v1 can't tell apart.
+    destination: team,
     successor: caller,
     artifact: (row) => caller(field(row, "sourceSession")),
     paths: false,
@@ -452,24 +462,24 @@ export type McpAccessClass = "work" | "workspace" | "owner";
 
 /** An authenticated HTTP caller: the seat it acts as comes with it (the DaemonClient built for it); this is what it may
  *  reach. A session is in scope when it is the caller's seat or a seat of one of its rigs; an item, when its source or
- *  destination is. A Cloud customer grant (`customer`) is narrower: see customerScope. */
+ *  destination is. An external grant (`external`) is narrower: see externalScope. */
 export type McpAccess = {
   principal: string; owner: boolean; rigs: readonly string[]; roots: readonly string[]; workspace: boolean;
-  /** A Cloud customer's grant: the object/action pairs it names (openrig.cloud.grant/v1 `objects`). */
-  customer?: { objects: Readonly<Record<string, readonly string[]>> };
+  /** An external caller's grant: the object/action pairs it names (openrig.grant/v1 `objects`). */
+  external?: { objects: Readonly<Record<string, readonly string[]>> };
 };
 
-/** The tool each customer object/action pair offers. A pair not listed here offers nothing. */
-const CUSTOMER_TOOLS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+/** The tool each external object/action pair offers. A pair not listed here offers nothing. */
+const EXTERNAL_TOOLS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
   queue: { create: "rig_queue_create", show: "rig_queue_show", list: "rig_queue_list" },
   artifact: { read: "rig_artifact_read" },
 };
 
-function customerTools(objects: Readonly<Record<string, readonly string[]>>): Set<string> {
+function externalTools(objects: Readonly<Record<string, readonly string[]>>): Set<string> {
   const tools = new Set<string>();
   for (const [object, actions] of Object.entries(objects)) {
     for (const action of Array.isArray(actions) ? actions : []) {
-      const tool = Object.hasOwn(CUSTOMER_TOOLS, object) && Object.hasOwn(CUSTOMER_TOOLS[object]!, action) ? CUSTOMER_TOOLS[object]![action] : undefined;
+      const tool = Object.hasOwn(EXTERNAL_TOOLS, object) && Object.hasOwn(EXTERNAL_TOOLS[object]!, action) ? EXTERNAL_TOOLS[object]![action] : undefined;
       if (tool) tools.add(tool);
     }
   }
@@ -518,14 +528,31 @@ export const MCP_OPERATIONS: ReadonlyArray<{ tool: string; routes: readonly stri
   { tool: "rig_queue_unclaim", routes: ["POST /api/queue/:qitemId/unclaim"], effect: "destructive", access: "work" },
 ];
 
-// Short guidance a client may show the model (the server's MCP instructions).
-const INSTRUCTIONS = [
+/** How a member works its inbox, and asks a person while keeping the work: one versioned text, carried in this server's
+ *  instructions and quoted in docs/reference/hosted-members.md. Change it here, bump the version, and update the quote. */
+export const MEMBER_WORKFLOW_VERSION = "member-workflow/v1";
+/** What the connection itself authorizes. */
+const MEMBER_AUTHORITY = "If the person connected you, that's basically authorized: claim the items in your inbox and do them without asking whether you may.";
+export const MEMBER_WORKFLOW = [
+  `Member workflow (${MEMBER_WORKFLOW_VERSION}). Your inbox is the items addressed to your seat: rig_queue_list with owned set. It's yours, not the team's queue. A wake, a ring or a message only points at it: list your inbox, then act.`,
+  "For each item: claim it (rig_queue_claim), do it, then close it done with the answer in resolution (rig_queue_update), or hand it on (rig_queue_handoff). Listing or reading an item doesn't take it.",
+  MEMBER_AUTHORITY,
+  "When an item needs a person's approval before you can finish it, don't close it and don't take the action: keep the item and ask.",
+  "If it came from a person (an address ending in @external that isn't a shared channel; the item's 'Shared channel:' line names one), set it blocked with blockedOn that person and, as its summary, the question with a short form of what you'll do: the person sees the summary and the item, not your note, which keeps the record. Link a longer draft as an https evidenceRef. Their answer returns the item to you in progress.",
+  "Otherwise ask as a new item, to the seat it came from or, for a shared channel's item, to your rig's lead (rig_team shows it), with your question and draft. Then set yours blocked with blockedOn that new qitemId: when that item closes, yours returns to pending, to claim again.",
+  "Nothing promises to wake you, so check your inbox again. Then finish the same item; don't open a new one.",
+].join(" ");
+
+// Short guidance a client may show the model (the server's MCP instructions). An external caller's connection asks the
+// team for work and isn't one of its members, so it isn't given the member workflow.
+const SHARED_INSTRUCTIONS = [
   "This server reaches an OpenRig team as one seat: the one named by OPENRIG_SESSION_NAME where the server was configured, or, over authenticated HTTP, the seat of the caller's grant (rig_whoami shows which, and whether the caller is authenticated; rig_team shows a rig's seats and its lead). The daemon attributes this server's writes to that seat.",
   "To hand work to a seat, use rig_queue_create and keep its qitemId; read the answer later with rig_queue_show, which names the next item when the work was handed on. To pass on work this seat holds, use rig_queue_handoff rather than closing it and creating another, so the work stays one chain. Queue items are durable: they outlive this conversation and this server.",
   "Tools marked read-only change nothing. A seat whose activity is unknown is not idle, and an accepted request (a restore's attemptId) is not a finished one.",
   "A question reserved for a person is theirs to answer: don't answer it on their behalf. rig_queue_decide records a decision only inside the decision room of the mode they have on, beside their answers and never as one.",
-  "Work addressed to this seat is listed by rig_queue_list with owned set. Claim an item with rig_queue_claim before working it, then answer it: close it done with a resolution (rig_queue_update), or hand it on with rig_queue_handoff. Listing or reading an item doesn't take it.",
-].join("\n");
+];
+const INSTRUCTIONS = [...SHARED_INSTRUCTIONS, MEMBER_WORKFLOW].join("\n");
+const EXTERNAL_INSTRUCTIONS = SHARED_INSTRUCTIONS.join("\n");
 
 /**
  * Maps a DaemonResponse to MCP tool result.
@@ -578,17 +605,18 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   const server = new McpServer({
     name: "openrig",
     version: CLI_VERSION,
-  }, { instructions: INSTRUCTIONS });
+  }, { instructions: options.access?.external ? EXTERNAL_INSTRUCTIONS : INSTRUCTIONS });
   const { access } = options;
   const rostersFolder = options.rostersFolder ?? (() => nodePath.join(new ConfigStore().get("workspace.root") as string, "rosters"));
   const presenceFile = options.presenceFile ?? (() => mcpPresenceFilePath());
   // The seat this server acts as: the authenticated caller's, else OPENRIG_SESSION_NAME where it was configured.
   const seatOf = (): string | undefined => options.seat ?? readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
   const accessClass = new Map(MCP_OPERATIONS.map((op) => [op.tool, op.access]));
-  // A local caller (no access) is offered every tool; an authenticated one, its class's; a customer, its grant's pairs.
-  const customer = access?.customer ? customerTools(access.customer.objects) : null;
+  // A local caller (no access) is offered every tool; an authenticated one, its class's; an external caller, its
+  // grant's pairs.
+  const external = access?.external ? externalTools(access.external.objects) : null;
   const offered = (tool: string): boolean => {
-    if (customer) return customer.has(tool);
+    if (external) return external.has(tool);
     if (!access || access.owner) return true;
     const kind = accessClass.get(tool);
     return kind === "work" || (kind === "workspace" && access.workspace);
@@ -1173,19 +1201,21 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       const id = qitemId ?? `qitem-${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}-${randomBytes(8).toString("hex")}`;
       try {
         const res = await client.post("/api/queue/create", {
-          qitemId: id, destinationSession: destination, body: lineage?.body ?? body, summary, tags, priority, tier,
+          qitemId: id, destinationSession: destination, body: lineage?.body ?? body, summary, priority, tier,
+          tags: access?.external ? tags?.filter((tag) => !OPENRIG_PROVENANCE_TAG.test(tag)) : tags,
           ...(alert ? { humanAlert: true } : {}),
           ...(lineage ? { chainOfRecord: lineage.chainOfRecord } : {}),
         });
-        // A customer reusing the id of an item it can't see learns only that the id is taken, never that item's parties.
+        // An external caller reusing the id of an item it can't see learns only that the id is taken, never that item's
+        // parties.
         const conflict = (res.data ?? {}) as { error?: unknown; existingSource?: unknown; existingDestination?: unknown };
         if (scope?.shows && res.status === 409 && conflict.error === "qitem_id_reuse"
           && !scope.item({ sourceSession: conflict.existingSource, destinationSession: conflict.existingDestination })) {
           return mapResult({ status: 409, data: { error: "qitem_id_reuse", message: `qitemId ${id} is already taken. Retry with a new one.` } }, undefined, { structured: true });
         }
-        // A create's return, a retry's stored row included, goes through the same customer projection as show and list.
-        const view = customerView(scope);
-        return mapResult(view && res.status < 400 ? { ...res, data: projectForCustomer(res.data, view) } : res, undefined, { structured: true });
+        // A create's return, a retry's stored row included, goes through the same external projection as show and list.
+        const view = externalView(scope);
+        return mapResult(view && res.status < 400 ? { ...res, data: projectForExternal(res.data, view) } : res, undefined, { structured: true });
       } catch (err) {
         const failure = caught(err);
         const text = `${(err as Error).message} The outcome is unknown: check rig_queue_show with qitemId ${id} before retrying, and retry only with that same qitemId.`;
@@ -1214,11 +1244,11 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         if (transitions.status >= 400) return mapResult(transitions);
         const row = (item.data ?? {}) as { state?: unknown; closureReason?: unknown; closureTarget?: unknown };
         const handedOn = row.state === "handed-off" || row.closureReason === "handed_off_to";
-        const view = customerView(scope);
+        const view = externalView(scope);
         let successor = handedOn ? await successorOf(client, qitemId, row.closureTarget, view ? scope!.item : undefined) : undefined;
         if (scope && !view && successor && "destinationSession" in successor && !scope.successor(successor.destinationSession)) successor = { unknown: true, code: "out_of_scope" };
         const data = view
-          ? { item: projectForCustomer(item.data, view), transitions: Array.isArray(transitions.data) ? transitions.data.map((t) => projectForCustomer(t, view)) : transitions.data }
+          ? { item: projectForExternal(item.data, view), transitions: Array.isArray(transitions.data) ? transitions.data.map((t) => projectForExternal(t, view)) : transitions.data }
           : { item: item.data, transitions: transitions.data };
         return mapResult({ status: 200, data: { ...data, ...(handedOn ? { successor } : {}) } }, undefined, { structured: true });
       } catch (err) {
@@ -1233,7 +1263,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     {
       description: "List queue items. owned: assigned to this seat. mine: this seat is the source or the destination. Without a scope, this seat's rig. Without state, open items only (all adds closed ones); a state filter returns exactly those states, closed ones included. since finds work updated after a time; handedOffFrom finds where a handed-off item went.",
       inputSchema: z.object({
-        owned: z.boolean().optional().describe("Only items assigned to this seat (overrides destination)"),
+        owned: z.boolean().optional().describe("Only items assigned to this seat: its whole inbox (overrides destination)"),
         mine: z.boolean().optional().describe("Items this seat sent or owns"),
         destination: z.string().optional().describe("Filter by destination seat"),
         source: z.string().optional().describe("Filter by source seat"),
@@ -1249,7 +1279,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       try {
         const params = new URLSearchParams();
         const sessionName = seatOf();
-        // A customer lists its own items only, so the daemon's limit counts those and not the team's.
+        // An external caller lists its own items only, so the daemon's limit counts those and not the team's.
         const mine = mineAsked || (scope?.ownListsOnly === true && !owned);
         if ((owned || mine) && !sessionName) {
           const message = "owned and mine need this server's seat: set OPENRIG_SESSION_NAME in its env, or filter by destination or source";
@@ -1281,9 +1311,9 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         }
         // An authenticated caller sees only the rows in its scope, whatever the filters matched.
         if (scope && res.status < 400 && Array.isArray(res.data)) {
-          const view = customerView(scope);
+          const view = externalView(scope);
           const rows = res.data.filter((row) => scope.item(row));
-          return mapResult({ ...res, data: view ? rows.map((row) => projectForCustomer(row, view)) : rows }, undefined, { structured: true });
+          return mapResult({ ...res, data: view ? rows.map((row) => projectForExternal(row, view)) : rows }, undefined, { structured: true });
         }
         return mapResult(res, undefined, { structured: true });
       } catch (err) {
@@ -1326,7 +1356,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         reopen: z.boolean().optional().describe("Reopen a closed item: give an active state (pending, in-progress or blocked) and a note (as rig queue update --reopen)"),
         summary: z.string().optional().describe("Replace the one-line summary"),
         evidenceRef: z.string().optional().describe("Pointer to the durable artifact, stored on the item when closing with state done or parking on a human seat; other updates refuse it"),
-        blockedOn: z.string().optional().describe("What it waits on, when blocking"),
+        blockedOn: z.string().optional().describe("What it waits on, when blocking: another qitemId (this item returns to pending when that one closes), or the address of the person this item came from, not a shared channel (they're asked with this item's summary, and their answer returns it to you in progress)"),
         wakeAfterSeconds: z.number().int().positive().optional().describe("Wake this seat after this many seconds, when blocking. Delivered only to a seat with a terminal: an attached app can't receive it today, so the item just waits until it is checked."),
       }),
       annotations: DESTRUCTIVE,
@@ -1400,6 +1430,14 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const targetRepo = readOpenRigEnv("OPENRIG_TARGET_REPO", "RIGGED_TARGET_REPO")?.trim();
         if (targetRepo) params.set("targetRepo", targetRepo);
         const res = await client.get(`/api/whoami?${params.toString()}`);
+        // whoami knows a seat by its session. A hosted member (a tool outside any terminal) has none: the seat is its
+        // grant's, so the authenticated caller is answered with that seat. Read only.
+        if (res.status === 404 && access && !access.external && options.seat === seat) {
+          const at = seat.indexOf("@");
+          const member = { ok: true, seat, rig: at >= 0 ? seat.slice(at + 1) : null, session: null, caller,
+            message: "This seat has no session here: it's the seat this connection's grant names, such as a hosted member's. rig_team shows its rig and hosted members, and rig_queue_list with owned set lists its work." };
+          return { content: [{ type: "text" as const, text: JSON.stringify(member) }], structuredContent: member };
+        }
         if (res.status >= 400) return mapResult(res);
         return mapResult({ ...res, data: { ...(res.data as Record<string, unknown>), caller } }, undefined, { structured: true });
       } catch (err) {
