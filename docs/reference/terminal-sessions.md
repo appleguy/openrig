@@ -165,7 +165,9 @@ explicitly incomplete; it is never silently presented as the whole team.
 
 The local lineage read has work limits: 50,000 scanned rows (plus one overflow
 sentinel), 8 MiB of encoded lineage, 100,000 links, and 16 KiB per chain record.
-It reads one snapshot and expands only the requested episode, up to 256 rows.
+It reads one snapshot from the requested task forward in insertion order and
+expands only that episode, up to 256 rows. Older referenced ancestors are checked
+by exact ID without expanding them; caller-supplied task IDs are supported.
 Hitting a work limit preserves known members and reports incomplete membership;
 it does not claim that an owner outside the scanned history is absent.
 

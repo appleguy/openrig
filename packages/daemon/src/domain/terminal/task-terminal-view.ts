@@ -65,11 +65,13 @@ function readTaskTerminalSnapshot(
   const issues: string[] = [];
   const scanIssues = new Set<string>();
   const knownIds = new Set([qitemId]);
+  const exists = db.prepare("SELECT 1 FROM queue_items WHERE qitem_id=?");
   const children = new Map<string, string[]>();
   let scanned = 0, bytes = 0, links = 0;
   const lineage = db.prepare(`/* task-lineage */ SELECT qitem_id,handed_off_from,${BOUNDED_CHAIN},
-    ${CHAIN_BYTES} AS chain_bytes FROM queue_items ORDER BY qitem_id LIMIT ?`);
-  scan: for (const value of lineage.iterate(MAX_LINEAGE_ROWS + 1)) {
+    ${CHAIN_BYTES} AS chain_bytes FROM queue_items
+    WHERE rowid >= (SELECT rowid FROM queue_items WHERE qitem_id=?) ORDER BY rowid LIMIT ?`);
+  scan: for (const value of lineage.iterate(qitemId, MAX_LINEAGE_ROWS + 1)) {
     if (scanned++ === MAX_LINEAGE_ROWS) { scanIssues.add(`Lineage scan reached its ${MAX_LINEAGE_ROWS}-row work limit; membership is incomplete.`); break; }
     const row = value as Pick<EpisodeRow, "qitem_id" | "handed_off_from" | "chain_of_record"> & { chain_bytes: number };
     knownIds.add(row.qitem_id);
@@ -78,7 +80,7 @@ function readTaskTerminalSnapshot(
     let chain: unknown = [];
     try { chain = JSON.parse(row.chain_of_record ?? "[]"); } catch { chain = null; }
     if (!Array.isArray(chain)) { scanIssues.add("Some local lineage could not be read within its per-record work limit; membership is incomplete."); chain = []; }
-    const refs = new Set([row.handed_off_from, ...(chain as unknown[]).filter((id): id is string => typeof id === "string" && id.startsWith("qitem-"))]);
+    const refs = new Set([row.handed_off_from, ...(chain as unknown[]).filter((id): id is string => typeof id === "string")]);
     for (const parent of refs) {
       if (!parent) continue;
       if (++links > MAX_LINEAGE_LINKS) { scanIssues.add("Lineage scan reached its link work limit; membership is incomplete."); break scan; }
@@ -110,7 +112,7 @@ function readTaskTerminalSnapshot(
     // The root's own ancestry is deliberately outside this view.
     if (row.qitem_id !== qitemId) {
       for (const ref of refs) {
-        if (!knownIds.has(ref)) {
+        if (!knownIds.has(ref) && !exists.get(ref)) {
           if (scanIssues.size) continue; // Already incomplete; an unscanned row is not proven absent.
           issues.push(`Lineage ${ref} referenced by ${row.qitem_id} is not available locally.`);
         }

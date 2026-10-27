@@ -40,6 +40,13 @@ describe("task terminal membership", () => {
     add("qitem-sibling", "sibling@team", "pending", "qitem-parent"); add("qitem-unrelated", "other@team");
     expect(read()!.task.members.map(m => m.seat)).toEqual(["a@team"]);
   });
+  it("keeps chain-only descendants of caller-supplied task ids", () => {
+    const { add, read } = fixture();
+    add("custom-task"); add("custom-child", "b@team", "pending", null, ["custom-task"]);
+    add("qitem-root"); add("qitem-child", "c@team", "pending", null, ["qitem-root"]);
+    expect(read("custom-task")!.task).toMatchObject({ complete: true, members: [{ seat: "a@team" }, { seat: "b@team" }] });
+    expect(read()!.task).toMatchObject({ complete: true, members: [{ seat: "a@team" }, { seat: "c@team" }] });
+  });
   it("deduplicates actual host/node identities and explains each active obligation", () => {
     const { db, add, seat } = fixture(); add("qitem-root"); add("qitem-alias", "alias@team", "blocked", "qitem-root");
     const result = readTaskTerminalView(db, "qitem-root", address => address === "alias@team" ? seat("a@team") : seat(address))!;
@@ -142,7 +149,7 @@ describe("task terminal membership", () => {
       for (let i = 0; i < 50002; i++) add(`qitem-noise-${i}`, "unrelated@team", "done");
       add("qitem-z-descendant", "unseen@team", "pending", "qitem-root");
     })();
-    let scanned = 0, projection = "";
+    let scanned = 0, projection = "", parameters: unknown[] = [];
     const prepare = db.prepare.bind(db);
     vi.spyOn(db, "prepare").mockImplementation(sql => {
       const statement = prepare(sql);
@@ -150,6 +157,7 @@ describe("task terminal membership", () => {
         projection = sql;
         const iterate = statement.iterate.bind(statement);
         vi.spyOn(statement, "iterate").mockImplementation(function* (...params: unknown[]) {
+          parameters = params;
           for (const row of iterate(...params)) { scanned++; yield row; }
         });
       }
@@ -160,10 +168,41 @@ describe("task terminal membership", () => {
     expect(result.task.issues.join(" ")).toContain("50000-row work limit");
     expect(scanned).toBe(50001); // Includes the one overflow sentinel, never the remaining history.
     expect(result.task.members.map(member => member.seat)).toEqual(["a@team"]);
-    const plan = prepare(`EXPLAIN QUERY PLAN ${projection}`).all(50001) as Array<{ detail: string }>;
-    expect(plan.some(row => row.detail.includes("USING INDEX"))).toBe(true);
+    const plan = prepare(`EXPLAIN QUERY PLAN ${projection}`).all(...parameters) as Array<{ detail: string }>;
+    expect(plan.some(row => /USING INDEX|INTEGER PRIMARY KEY/.test(row.detail))).toBe(true);
     expect(plan.some(row => row.detail.includes("TEMP B-TREE"))).toBe(false);
     console.info("task lineage work", JSON.stringify({ storedRows: 50004, scannedRows: scanned, complete: result.task.complete, plan: plan.map(row => row.detail) }));
+  }, 20000);
+  it("starts the bounded scan at the root after unrelated history and resolves older ancestry", () => {
+    const { db, add, read } = fixture();
+    db.transaction(() => {
+      add("qitem-older-parent", "older@team", "done");
+      for (let i = 0; i < 50001; i++) add(`qitem-noise-${i}`, "unrelated@team", "done");
+      add("qitem-root", "a@team", "in-progress", "qitem-older-parent", ["qitem-older-parent"]);
+      add("qitem-z-descendant", "b@team", "pending", null, ["qitem-root", "qitem-older-parent"]);
+    })();
+    let scanned = 0, projection = "", parameters: unknown[] = [];
+    const prepare = db.prepare.bind(db);
+    vi.spyOn(db, "prepare").mockImplementation(sql => {
+      const statement = prepare(sql);
+      if (sql.includes("/* task-lineage */")) {
+        projection = sql;
+        const iterate = statement.iterate.bind(statement);
+        vi.spyOn(statement, "iterate").mockImplementation(function* (...params: unknown[]) {
+          parameters = params;
+          for (const row of iterate(...params)) { scanned++; yield row; }
+        });
+      }
+      return statement;
+    });
+    const result = read()!;
+    expect(result.task.complete).toBe(true);
+    expect(result.task.members.map(member => member.seat)).toEqual(["a@team", "b@team"]);
+    expect(scanned).toBe(2);
+    const plan = prepare(`EXPLAIN QUERY PLAN ${projection}`).all(...parameters) as Array<{ detail: string }>;
+    expect(plan.some(row => /SEARCH queue_items USING INTEGER PRIMARY KEY/.test(row.detail))).toBe(true);
+    expect(plan.some(row => row.detail.includes("TEMP B-TREE"))).toBe(false);
+    console.info("task root-forward work", JSON.stringify({ storedRows: 50004, scannedRows: scanned, complete: result.task.complete, plan: plan.map(row => row.detail) }));
   }, 20000);
   it("does not parse an oversized lineage record or report a complete team", () => {
     const { add, read } = fixture(); add("qitem-root");
