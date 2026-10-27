@@ -53,14 +53,15 @@ stays the endpoint; a proxy in front forwards the metadata path unchanged.`)
       const deps = getDepsF();
 
       let daemonUrl: string;
-      if (opts.port !== undefined) {
+      if (opts.port) {
         const daemonPort = parseInt(opts.port, 10);
-        // A port outside 1..65535 started the server anyway, and then every tool call failed with
-        // "Failed to parse URL". Same parseInt as before, so each --port that worked still does.
-        if (Number.isNaN(daemonPort) || daemonPort < 1 || daemonPort > 65535) {
-          console.error(`Invalid port number: must be an integer in [1, 65535], got "${opts.port}"`);
+        if (Number.isNaN(daemonPort)) {
+          console.error("Invalid port number");
           process.exitCode = 1;
           return;
+        }
+        if (daemonPort < 1 || daemonPort > 65535) {
+          console.error(`Warning: daemon port ${daemonPort} is outside [1, 65535]; MCP will start, but daemon tool calls may fail. Check --port.`);
         }
         daemonUrl = `http://127.0.0.1:${daemonPort}`;
       } else {
