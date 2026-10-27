@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { HerdrViewer, type HerdrViewerRun } from "../src/domain/terminal/herdr-viewer.js";
@@ -20,19 +20,21 @@ function fixture() {
   const calls: string[][] = [];
   let ids = { workspace_id: "w1", pane_id: "w1:p1", terminal_id: "term_001", cwd: "" };
   let label = "", running = false, uncertainCreate = false, uncertainRun = false, idless = false;
+  let gone = false, enumerable = true, unreadable = false;
   const inspect = async () => ({ sessionId: "$1", nodeId: key.nodeId });
   const run: HerdrViewerRun = async args => {
     calls.push(args);
     const command = args.slice(0, 2).join(" ");
     if (command === "status server") return JSON.stringify({ running: true, version: "0.9.5", protocol: 22, socket });
     if (command === "workspace create") {
+      gone = false; enumerable = true;
       ids.cwd = args[args.indexOf("--cwd") + 1]!; label = args[args.indexOf("--label") + 1]!;
       if (uncertainCreate) { uncertainCreate = false; throw new Error("lost response"); }
       return JSON.stringify({ result: { root_pane: idless ? {} : ids } });
     }
-    if (command === "workspace list") return JSON.stringify({ result: { workspaces: [{ workspace_id: ids.workspace_id, label }] } });
+    if (command === "workspace list") return JSON.stringify({ result: unreadable ? {} : { workspaces: enumerable ? [{ workspace_id: ids.workspace_id, label }] : [] } });
     if (command === "pane list") return JSON.stringify({ result: { panes: [ids] } });
-    if (command === "pane get") return JSON.stringify({ result: { pane: ids } });
+    if (command === "pane get") { if (gone) throw new Error("pane not found"); return JSON.stringify({ result: { pane: ids } }); }
     if (command === "pane run") {
       running = true;
       if (uncertainRun) { uncertainRun = false; throw new Error("lost run response"); }
@@ -43,7 +45,10 @@ function fixture() {
     throw new Error(`Unexpected provider operation ${args}`);
   };
   const viewer = () => new HerdrViewer(socket, run, "linux", root, inspect);
-  return { root, target, calls, viewer, ids, setCreateLost: () => { uncertainCreate = true; }, setRunLost: () => { uncertainRun = true; }, setIdless: () => { idless = true; }, exit: () => { running = false; } };
+  return { root, target, calls, viewer, ids,
+    lose: (listed: boolean, malformed = false) => { gone = true; enumerable = listed; unreadable = malformed; },
+    loseChanged: () => { gone = false; enumerable = false; },
+    setCreateLost: () => { uncertainCreate = true; }, setRunLost: () => { uncertainRun = true; }, setIdless: () => { idless = true; }, exit: () => { running = false; } };
 }
 
 describe("owned Herdr viewer", () => {
@@ -79,6 +84,35 @@ describe("owned Herdr viewer", () => {
     expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: true, created: false });
     f.ids.terminal_id = "term_new_generation";
     expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unconfirmed" });
+    expect(f.calls.filter(a => a[1] === "create")).toHaveLength(1);
+  });
+  it.each(["gone", "changed"])("retires an absent %s viewer before exactly one fresh verified create", async mode => {
+    const f = fixture(); expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: true });
+    const oldCwd = f.ids.cwd;
+    if (mode === "changed") f.ids.terminal_id = "new-generation";
+    f.lose(false);
+    if (mode === "changed") f.loseChanged();
+    // Passive preview must not retire presentation provenance or its directory.
+    expect(await f.viewer().lookup(key, f.target)).toMatchObject({ ok: false });
+    expect(existsSync(oldCwd)).toBe(true);
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_not_provisioned" });
+    expect(existsSync(oldCwd)).toBe(false);
+    const file = readdirSync(f.root).find(name => name.endsWith(".json"))!;
+    expect(Object.keys(JSON.parse(readFileSync(path.join(f.root, file), "utf8")).entries)).toEqual([]);
+    expect(f.calls.filter(a => a[1] === "create")).toHaveLength(1);
+    const next = f.viewer();
+    expect(await next.ensure(key, f.target)).toMatchObject({ ok: true, created: true });
+    expect(await next.ensure(key, f.target)).toMatchObject({ ok: true, created: false });
+    expect(f.calls.filter(a => a[1] === "create")).toHaveLength(2);
+    expect(f.ids.cwd).not.toBe(oldCwd);
+  });
+  it.each(["enumerable", "unreadable"])("keeps a %s lost viewer unconfirmed without retiring or creating", async mode => {
+    const f = fixture(); expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: true });
+    const oldCwd = f.ids.cwd;
+    f.lose(mode === "enumerable", mode === "unreadable");
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unconfirmed" });
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unconfirmed" });
+    expect(existsSync(oldCwd)).toBe(true);
     expect(f.calls.filter(a => a[1] === "create")).toHaveLength(1);
   });
   it("does not count a persistent shell after viewer exit as a working attachment", async () => {

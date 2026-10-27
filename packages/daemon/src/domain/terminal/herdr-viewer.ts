@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { getDefaultOpenRigPath } from "../../openrig-compat.js";
 import { resolveOnPath } from "../../adapters/tmux-exec.js";
@@ -76,6 +76,25 @@ export class HerdrViewer {
     const result = this.pending.then(() => this.ensureOnce(key, target, false));
     this.pending = result.then(() => {}, () => {}); return result;
   }
+  private async ownedPanes(entry: Entry): Promise<Pane[]> {
+    const listed = body(await this.run(["workspace", "list", "--json"]));
+    if (!Array.isArray(listed.workspaces)) throw new Error("Viewer enumeration is unreadable.");
+    const found: Pane[] = [];
+    let matchingWorkspaces = 0;
+    for (const workspace of listed.workspaces as Array<Record<string, unknown>>) {
+      if (!workspace || typeof workspace.label !== "string" || typeof workspace.workspace_id !== "string") throw new Error("Viewer workspace enumeration is incomplete.");
+      if (workspace.label !== entry.label) continue;
+      if (++matchingWorkspaces > 1) throw new Error("Viewer workspace attribution is ambiguous.");
+      const listedPanes = body(await this.run(["pane", "list", "--workspace", workspace.workspace_id]));
+      if (!Array.isArray(listedPanes.panes)) throw new Error("Viewer pane enumeration is unreadable.");
+      for (const raw of listedPanes.panes) {
+        const candidate = pane(raw);
+        if (!candidate) throw new Error("Viewer pane enumeration is incomplete.");
+        if (candidate.cwd === entry.cwd) found.push(candidate);
+      }
+    }
+    return found;
+  }
   private async ensureOnce(key: ViewerKey, target: ComposedPane, provision = true, stillCurrent: () => Promise<boolean> = async () => true): Promise<ViewerResult> {
     try {
       if (this.platform !== "linux") return { ok: false, code: "viewer_unsupported", error: "Ensure-viewer is qualified on Linux Herdr 0.9.5/protocol 22 only." };
@@ -123,19 +142,28 @@ export class HerdrViewer {
       if (!entry.pane) {
         // A unique private cwd attributes a previously initiated create, not a
         // caller ID or mutable display label. Empty/unreadable is still unknown.
-        const listed = body(await this.run(["workspace", "list", "--json"]));
-        if (!Array.isArray(listed.workspaces)) return unavailable("Cannot reconcile an uncertain viewer creation.");
-        const matches = (listed.workspaces as Array<Record<string, unknown>>).filter(w => w.label === entry!.label);
-        if (matches.length !== 1 || typeof matches[0]!.workspace_id !== "string") return unavailable("Uncertain viewer creation has no unique readback; no create was retried.");
-        const panes = body(await this.run(["pane", "list", "--workspace", matches[0]!.workspace_id as string]));
-        const found = Array.isArray(panes.panes) ? panes.panes.map(pane).filter((p): p is Pane => !!p && p.cwd === entry!.cwd) : [];
+        const found = await this.ownedPanes(entry);
         if (found.length !== 1) return unavailable("Uncertain viewer creation has no unique private-cwd mapping.");
         entry.pane = found[0]!; entry.phase = "created"; if (provision) save();
       }
-      const current = pane(body(await this.run(["pane", "get", entry.pane.pane_id])).pane);
+      let current: Pane | null;
+      try { current = pane(body(await this.run(["pane", "get", entry.pane.pane_id])).pane); }
+      catch { current = null; } // A missing ID alone never proves absence.
       if (!current || current.pane_id !== entry.pane.pane_id || current.terminal_id !== entry.pane.terminal_id
         || current.workspace_id !== entry.pane.workspace_id || current.cwd !== entry.cwd) {
-        return unavailable("Viewer identity changed or disappeared; a provider restart cannot reuse a pane ID alone.");
+        if (!provision || (await this.ownedPanes(entry)).length !== 0) {
+          return unavailable("Viewer identity changed or disappeared; an enumerable viewer cannot be replaced.");
+        }
+        // Only a complete empty readback retires provenance. Remove our empty
+        // attribution directory, never provider panes or arbitrary journal paths.
+        if (!/^openrig-viewer-[0-9a-f-]{36}$/.test(entry.label)
+          || entry.cwd !== path.join(this.root, endpoint, entry.label.slice("openrig-viewer-".length))) {
+          return unavailable("Absent viewer provenance has no owned attribution directory.");
+        }
+        try { rmdirSync(entry.cwd); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+        delete journal.entries[id]; save();
+        return { ok: false, code: "viewer_not_provisioned", error: "The old viewer is confirmed absent; ensure again to create a verified replacement." };
       }
       if (entry.phase === "created") {
         if (!provision) return unavailable("The created viewer process is not yet confirmed.");
