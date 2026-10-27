@@ -18,6 +18,10 @@ export interface GoalObjectiveFallback {
   reason: GoalObjectiveFallbackReason;
 }
 
+export interface GoalObjectiveMetadata extends GoalObjectiveSource {
+  fallback?: GoalObjectiveFallback;
+}
+
 export type SeatGoalObjectiveResolution =
   | { ok: true; objective: string; source: GoalObjectiveSource; fallback?: GoalObjectiveFallback }
   | { ok: false; error: { code: string; message: string; candidates?: string[] } };

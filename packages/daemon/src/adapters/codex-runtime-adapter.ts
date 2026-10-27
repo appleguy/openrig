@@ -150,7 +150,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   readonly runtime = "codex";
   // Only serialize the read/compare/mutate boundary, never retain goal state here.
   private goalOperations = new Map<string, Promise<void>>();
-  async controlGoal(input: { binding: Binding; threadId: string; socketPath: string; change: GoalChange; beforeMutation: () => Promise<void> }) {
+  async controlGoal(input: { binding: Binding; threadId: string; socketPath?: string; change: GoalChange; beforeMutation: () => Promise<void> }) {
     const target = input.binding.tmuxPane;
     if (!target) throw new GoalControlError("goal_identity_unverified", "A bound tmux pane is required");
     const observe = () => verifyCodexPaneProcess({ target, tmux: this.tmux, listProcesses: this.listProcesses,
@@ -173,12 +173,14 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       let version: { status?: string; socketPath?: string; cliVersion?: string; appServerVersion?: string };
       try { version = JSON.parse(metadata.stdout); } catch { throw new GoalControlError("goal_endpoint_unverified", "Codex managed endpoint metadata is unreadable"); }
       if (metadata.status !== 0 || version.status !== "running" || !version.cliVersion || version.cliVersion !== version.appServerVersion
-        || !version.socketPath || !nodePath.isAbsolute(version.socketPath) || version.socketPath !== input.socketPath) {
+        || !version.socketPath || !nodePath.isAbsolute(version.socketPath) || input.socketPath !== undefined && version.socketPath !== input.socketPath) {
         throw new GoalControlError("goal_endpoint_unverified", "Codex did not verify the target process's running managed endpoint and matching version");
       }
       socket = version.socketPath;
     }
-    if (!nodePath.isAbsolute(socket) || socket !== input.socketPath) throw new GoalControlError("goal_endpoint_unverified", "The supplied socket does not match the verified client's endpoint");
+    if (!nodePath.isAbsolute(socket) || input.socketPath !== undefined && socket !== input.socketPath) {
+      throw new GoalControlError("goal_endpoint_unverified", "The supplied socket does not match the verified client's endpoint");
+    }
     const check = async () => {
       await input.beforeMutation();
       if ((await observe())?.fingerprint !== native.fingerprint) throw new GoalControlError("goal_identity_changed", "The target process changed before goal dispatch");
@@ -954,7 +956,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // 0.5.2-07 A2-3: the FORK path threads the SPEC model too (fork-instantiate reverted it before).
       // The git dirs and the seat folder follow the parent id: ps flattens argv, so a path with a space placed before the
       // id would be read as the id when the fork is verified.
-      const cmd = `codex${daemonArg}${postureArg}${networkArg}${modelArg}${effortArg} fork${queueStateDirArg} ${shellQuote(parentId)}${gitDirArg}${seatFolderArg}`;
+      const cmd = `codex${daemonArg}${postureArg}${networkArg}${modelArg}${effortArg} --remote unix:// fork${queueStateDirArg} ${shellQuote(parentId)}${gitDirArg}${seatFolderArg}`;
       const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, await this.seatCommand(binding, cmd));
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
@@ -991,7 +993,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // 0.5.2-07 A2-3: the pod-aware RESUME path threads the SPEC model too (reverted before — the
       // grounding map assumed codex parity with the claude adapter, but only fresh emitted -m).
       ? this.resumeCore(prepared, opts.resumeToken, binding)
-      : `codex${daemonArg}${postureArg}${networkArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${seatFolderArg}${queueStateDirArg}${modelArg}${effortArg}`;
+      : `codex${daemonArg}${postureArg}${networkArg} --remote unix:// -C ${shellQuote(binding.cwd)}${gitDirArg}${seatFolderArg}${queueStateDirArg}${modelArg}${effortArg}`;
 
     const staged = await this.seatCommand(binding, cmd);
     if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false, error: "Selected history changed during Codex launch preparation; no native command was sent.", recovery: "attention_required" };

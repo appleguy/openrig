@@ -19,10 +19,21 @@ describe("native seat goal route", () => {
   afterEach(() => { controlGoal.mockClear(); });
   const post = (body: unknown) => setup.app.request("/api/seat/goal/audit-lead%40goal-test", { method: "POST",
     headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  it("routes exact verified binding and status-only intent to the runtime adapter", async () => {
-    const res = await post({ operation: "set", threadId, socketPath: "/target/rpc.sock", status: "active" });
+  it("routes explicit target and authored objective provenance through the existing goal service", async () => {
+    const objectiveSource = { altitude: "slice", specPath: "/work/missions/audit/slices/01-goal/SPEC.md",
+      specAddress: "mission:slices/01-goal/SPEC.md", selectionSource: "explicit" };
+    const res = await post({ operation: "set", threadId, socketPath: "/target/rpc.sock", status: "active",
+      objective: "Slice objective", objectiveSource });
     expect(res.status).toBe(200);
-    expect(controlGoal).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ threadId, binding: expect.objectContaining({ tmuxPane: "%1" }), change: { operation: "set", status: "active" } }));
+    expect(controlGoal).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ threadId, socketPath: "/target/rpc.sock",
+      binding: expect.objectContaining({ tmuxPane: "%1" }), change: { operation: "set", status: "active", objective: "Slice objective" } }));
+    expect(await res.json()).toMatchObject({ objectiveSource });
+  });
+  it("defaults thread identity from the target seat and leaves endpoint resolution to its bound process", async () => {
+    const res = await post({ operation: "get" });
+    expect(res.status).toBe(200);
+    expect(controlGoal).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ threadId, binding: expect.objectContaining({ tmuxPane: "%1" }) }));
+    expect(controlGoal.mock.calls[0]![0].socketPath).toBeUndefined();
   });
   it("refuses stale occupant and malformed requests before adapter dispatch", async () => {
     expect((await post({ operation: "clear", threadId: "01a179a1-0000-0000-0000-000000000000", socketPath: "/target/rpc.sock" })).status).toBe(409);

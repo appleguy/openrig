@@ -79,7 +79,7 @@ describe("OPR.0.4.8.2 YOLO mode — opt-in, default OFF, launch-flag surface onl
   it("Codex resume: OFF -> explicit -s workspace-write floor flag; ON -> -s danger-full-access", () => {
     delete process.env.OPENRIG_YOLO;
     const off = buildCodexResumeCore("tok-1", null, false);
-    expect(off).toBe("codex -s workspace-write resume 'tok-1'");
+    expect(off).toBe("codex -s workspace-write --remote unix:// resume 'tok-1'");
 
     process.env.OPENRIG_YOLO = "1";
     const on = buildCodexResumeCore("tok-1", null, false);

@@ -7,6 +7,7 @@ import Database from "better-sqlite3";
 import { parse as parseToml } from "smol-toml";
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { CodexRuntimeAdapter, type CodexAdapterFsOps } from "../src/adapters/codex-runtime-adapter.js";
+import { CodexGoalClient } from "../src/adapters/codex-goal-client.js";
 import type { NodeBinding, ResolvedStartupFile } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../src/domain/projection-planner.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
@@ -101,7 +102,7 @@ function expectedFreshLaunchCommand(options: { cwd?: string; model?: string; eff
   const queueDirArg = options.queueRoot === null ? "" : ` --add-dir ${quote(options.queueRoot ?? testQueueRoot())}`;
   const modelArg = options.model ? ` -m ${quote(options.model)}` : "";
   const effortArg = options.effort ? ` -c ${quote(`model_reasoning_effort="${options.effort}"`)}` : "";
-  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false' -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg}${effortArg}`;
+  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false' --remote unix:// -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg}${effortArg}`;
 }
 
 // A resume and a fork add the same git metadata dir as the fresh launch, after the conversation id (`gitCwd` null: none,
@@ -114,14 +115,14 @@ function expectedResumeCommand(token = "sess-456", queueRoot: string | null = te
   const queueDirArg = queueRoot === null ? "" : ` --add-dir ${quote(queueRoot)}`;
   const modelArg = model ? ` -m ${quote(model)}` : "";
   const effortArg = effort ? ` -c ${quote(`model_reasoning_effort="${effort}"`)}` : "";
-  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false'${modelArg}${effortArg} resume ${quote(token)}${queueDirArg}${gitDirOption(gitCwd)}`;
+  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false'${modelArg}${effortArg} --remote unix:// resume ${quote(token)}${queueDirArg}${gitDirOption(gitCwd)}`;
 }
 
 function expectedForkCommand(parentId = "parent-thread-id", options: { model?: string; effort?: string; queueRoot?: string | null; gitCwd?: string | null } = {}): string {
   const queueDirArg = options.queueRoot === null ? "" : ` --add-dir ${quote(options.queueRoot ?? testQueueRoot())}`;
   const modelArg = options.model ? ` -m ${quote(options.model)}` : "";
   const effortArg = options.effort ? ` -c ${quote(`model_reasoning_effort="${options.effort}"`)}` : "";
-  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false'${modelArg}${effortArg} fork${queueDirArg} ${quote(parentId)}${gitDirOption(options.gitCwd === undefined ? "/project" : options.gitCwd)}`;
+  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false'${modelArg}${effortArg} --remote unix:// fork${queueDirArg} ${quote(parentId)}${gitDirOption(options.gitCwd === undefined ? "/project" : options.gitCwd)}`;
 }
 
 function expectedProfileFreshLaunchCommand(profile: string, options: { cwd?: string; model?: string; queueRoot?: string | null } = {}): string {
@@ -129,12 +130,12 @@ function expectedProfileFreshLaunchCommand(profile: string, options: { cwd?: str
   const gitDirArg = ` --add-dir ${quote(nodePath.join(cwd, ".git"))}`;
   const queueDirArg = options.queueRoot === null ? "" : ` --add-dir ${quote(options.queueRoot ?? testQueueRoot())}`;
   const modelArg = options.model ? ` -m ${quote(options.model)}` : "";
-  return `codex -p ${quote(profile)} '-c' 'check_for_update_on_startup=false' -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg}`;
+  return `codex -p ${quote(profile)} '-c' 'check_for_update_on_startup=false' --remote unix:// -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg}`;
 }
 
 function expectedProfileResumeCommand(profile: string, token = "sess-456", queueRoot: string | null = testQueueRoot(), gitCwd: string | null = "/project"): string {
   const queueDirArg = queueRoot === null ? "" : ` --add-dir ${quote(queueRoot)}`;
-  return `codex -p ${quote(profile)} '-c' 'check_for_update_on_startup=false' resume ${quote(token)}${queueDirArg}${gitDirOption(gitCwd)}`;
+  return `codex -p ${quote(profile)} '-c' 'check_for_update_on_startup=false' --remote unix:// resume ${quote(token)}${queueDirArg}${gitDirOption(gitCwd)}`;
 }
 
 beforeEach(() => {
@@ -184,6 +185,42 @@ function createCodexLogsDb(homeDir: string, pid: number, threadId: string, dbNam
 }
 
 describe("Codex runtime adapter", () => {
+  it("derives an omitted goal socket from the verified target process home", async () => {
+    const threadId = "01a179a1-9ac1-7cf1-b249-4acf7d07868a";
+    const startedAt = "Tue Oct 20 05:00:01 2026";
+    const processes = [
+      { pid: 900, ppid: 1, command: "/bin/zsh", pgid: 900, tpgid: 901, executableName: "zsh", startedAt: "Tue Oct 20 04:59:00 2026" },
+      { pid: 901, ppid: 900, command: `codex --remote unix:// resume ${threadId}`, pgid: 901, tpgid: 901, executableName: "codex", startedAt },
+    ];
+    const tmux = mockTmux({ getPanePid: vi.fn(async () => 900) });
+    const processEnvironment = vi.fn(async () => ({ home: "/target-home", codexHome: "/target-codex-home" }));
+    const runCodexCli = vi.fn(async (_args: string[], _env: NodeJS.ProcessEnv, _timeout?: number) => ({ status: 0, stdout: JSON.stringify({ status: "running", cliVersion: "1", appServerVersion: "1",
+      socketPath: "/target-codex-home/run/app-server.sock" }), stderr: "" }));
+    const apply = vi.fn(async (_thread: string, _change: unknown, beforeMutation: () => Promise<void>) => {
+      await beforeMutation();
+      return { goal: null, changed: false };
+    });
+    const connect = vi.spyOn(CodexGoalClient, "connect").mockResolvedValue({ apply, close: vi.fn() } as unknown as CodexGoalClient);
+    try {
+      const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), listProcesses: () => processes,
+        readResumeEvidence: () => ({ threadId }), resolveCodexProcessEnvironmentByPid: processEnvironment,
+        runCodexCli, launchPath: "/target/bin" });
+      const result = await adapter.controlGoal({ binding: { ...makeBinding(), tmuxPane: "%1" }, threadId,
+        change: { operation: "get" }, beforeMutation: async () => {} });
+
+      expect(result).toEqual({ goal: null, changed: false });
+      expect(processEnvironment).toHaveBeenCalledWith(901);
+      expect(runCodexCli).toHaveBeenCalledWith(["app-server", "daemon", "version"], expect.objectContaining({
+        HOME: "/target-home", CODEX_HOME: "/target-codex-home", PATH: "/target/bin",
+      }), 3000);
+      expect(runCodexCli.mock.calls[0]![1]).not.toHaveProperty("CODEX_APP_SERVER_SOCKET");
+      expect(connect).toHaveBeenCalledWith("/target-codex-home/run/app-server.sock");
+      expect(apply).toHaveBeenCalledWith(threadId, { operation: "get" }, expect.any(Function));
+    } finally {
+      connect.mockRestore();
+    }
+  });
+
   it("launches the probed executable despite a different login-shell PATH", async () => {
     const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "codex-launch-path-"));
     try {

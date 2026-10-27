@@ -209,9 +209,9 @@ describe("Node Inventory Projection", () => {
     expect(entry?.resumeCommand).toBeNull();
     expect(entry?.recoveryGuidance).toBeNull(); // relocated to detail
     const detail = getNodeDetail(db, "rig-2", "dev.qa");
-    expect(detail?.recoveryGuidance?.summary).toContain("codex -s workspace-write resume --last");
+    expect(detail?.recoveryGuidance?.summary).toContain("codex -s workspace-write --remote unix:// resume --last");
     expect(detail?.recoveryGuidance?.summary).toContain("resolved permission settings");
-    expect(detail?.recoveryGuidance?.commands).toEqual(["cd /workspace/app", "codex -s workspace-write resume --last"]);
+    expect(detail?.recoveryGuidance?.commands).toEqual(["cd /workspace/app", "codex -s workspace-write --remote unix:// resume --last"]);
     expect(detail?.recoveryGuidance?.notes).toContain("Use workspace and recent prompt text to identify the right conversation.");
     expect(detail?.recoveryGuidance?.notes).toContain("If the identity anchor was captured, the picker may include: dev-qa@test-rig");
   });
@@ -230,11 +230,11 @@ describe("Node Inventory Projection", () => {
     const entry = getNodeInventory(db, "rig-2").find((e) => e.logicalId === "platform.mac-admin");
 
     expect(entry?.codexConfigProfile).toBe("sysadmin");
-    expect(entry?.resumeCommand).toBe("codex -p 'sysadmin' resume 'sess-456'");
+    expect(entry?.resumeCommand).toBe("codex -p 'sysadmin' --remote unix:// resume 'sess-456'");
     expect(entry?.recoveryGuidance).toBeNull(); // relocated to detail
     const detail = getNodeDetail(db, "rig-2", "platform.mac-admin");
     expect(detail?.codexConfigProfile).toBe("sysadmin");
-    expect(detail?.recoveryGuidance?.commands).toContain("codex -p 'sysadmin' resume 'sess-456'");
+    expect(detail?.recoveryGuidance?.commands).toContain("codex -p 'sysadmin' --remote unix:// resume 'sess-456'");
     expect(detail?.recoveryGuidance?.notes).toContain("Preserve Codex config profile: sysadmin");
   });
 
@@ -248,7 +248,7 @@ describe("Node Inventory Projection", () => {
 
     const entry = getNodeInventory(db, "rig-yolo").find((node) => node.logicalId === "dev.agent");
     const detail = getNodeDetail(db, "rig-yolo", "dev.agent");
-    const command = "codex -s danger-full-access -a never -m 'gpt-5-codex' -c 'model_reasoning_effort=\"high\"' resume 'thread-123'";
+    const command = "codex -s danger-full-access -a never -m 'gpt-5-codex' -c 'model_reasoning_effort=\"high\"' --remote unix:// resume 'thread-123'";
     expect(entry?.resumeCommand).toBe(command);
     expect(detail?.recoveryGuidance?.commands).toContain(command);
     expect(detail?.recoveryGuidance?.summary).toContain("resolved permission settings");
@@ -265,7 +265,7 @@ describe("Node Inventory Projection", () => {
 
     const entry = getNodeInventory(db, "rig-yolo").find((node) => node.logicalId === "dev.agent");
     const detail = getNodeDetail(db, "rig-yolo", "dev.agent");
-    const command = "codex -p 'sysadmin' -s workspace-write -a never -c 'sandbox_workspace_write.writable_roots=[]' -c 'sandbox_workspace_write.network_access=false' -c 'sandbox_workspace_write.exclude_tmpdir_env_var=false' -c 'sandbox_workspace_write.exclude_slash_tmp=false' resume 'thread-envelope'";
+    const command = "codex -p 'sysadmin' -s workspace-write -a never -c 'sandbox_workspace_write.writable_roots=[]' -c 'sandbox_workspace_write.network_access=false' -c 'sandbox_workspace_write.exclude_tmpdir_env_var=false' -c 'sandbox_workspace_write.exclude_slash_tmp=false' --remote unix:// resume 'thread-envelope'";
     expect(entry?.resumeCommand).toBe(command);
     expect(detail?.recoveryGuidance?.commands).toContain(command);
   });

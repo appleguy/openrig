@@ -35,11 +35,11 @@ const withChoice = (daemonOptOut: boolean) => ({ ...codexFloor, daemonOptOut }) 
 describe("the printed Codex resume command", () => {
   it("adds --no-daemon right after codex only for a positively recorded opt-out", () => {
     const old = buildCodexResumeCore("sess 456", null);
-    expect(old).toBe("codex -s workspace-write resume 'sess 456'");
+    expect(old).toBe("codex -s workspace-write --remote unix:// resume 'sess 456'");
     const build = buildNativeResumeCommand as (...args: unknown[]) => string | null;
     expect(build("codex", "sess 456", null, null)).toBe(old);
     expect(build("codex", "sess 456", null, null, false)).toBe(old);
-    expect(build("codex", "sess 456", null, null, true)).toBe("codex --no-daemon -s workspace-write resume 'sess 456'");
+    expect(build("codex", "sess 456", null, null, true)).toBe("codex --no-daemon -s workspace-write --remote unix:// resume 'sess 456'");
     expect(build("codex", "sess 456", null, "profile's name", true))
       .toBe(buildCodexResumeCore("sess 456", "profile's name").replace(/^codex /, "codex --no-daemon "));
     // Claude's command has no daemon choice.
@@ -107,24 +107,24 @@ describe("rig ps resumeCommand and the node detail's recovery guidance", () => {
     it("a recorded opt-out prints --no-daemon in both, with no limitation note", () => {
       record(withChoice(true));
       const { resumeCommand, guidance } = printed();
-      expect(resumeCommand).toBe("codex --no-daemon -s workspace-write resume 'sess-456'");
-      expect(guidance.commands).toEqual(["codex --no-daemon -s workspace-write resume 'sess-456'", "cd /workspace/app"]);
+      expect(resumeCommand).toBe("codex --no-daemon -s workspace-write --remote unix:// resume 'sess-456'");
+      expect(guidance.commands).toEqual(["codex --no-daemon -s workspace-write --remote unix:// resume 'sess-456'", "cd /workspace/app"]);
       expect(guidance.notes).not.toContain(NOT_RECORDED);
     });
 
     it("a recorded legacy launch prints the old command unchanged, with no limitation note", () => {
       record(withChoice(false));
       const { resumeCommand, guidance } = printed();
-      expect(resumeCommand).toBe("codex -s workspace-write resume 'sess-456'");
-      expect(guidance.commands).toEqual(["codex -s workspace-write resume 'sess-456'", "cd /workspace/app"]);
+      expect(resumeCommand).toBe("codex -s workspace-write --remote unix:// resume 'sess-456'");
+      expect(guidance.commands).toEqual(["codex -s workspace-write --remote unix:// resume 'sess-456'", "cd /workspace/app"]);
       expect(guidance.notes).not.toContain(NOT_RECORDED);
     });
 
     it("an unrecorded choice keeps the old command and says it isn't known", () => {
       record(codexFloor);
       const { resumeCommand, guidance } = printed();
-      expect(resumeCommand).toBe("codex -s workspace-write resume 'sess-456'");
-      expect(guidance.commands).toEqual(["codex -s workspace-write resume 'sess-456'", "cd /workspace/app"]);
+      expect(resumeCommand).toBe("codex -s workspace-write --remote unix:// resume 'sess-456'");
+      expect(guidance.commands).toEqual(["codex -s workspace-write --remote unix:// resume 'sess-456'", "cd /workspace/app"]);
       expect(guidance.notes).toContain(NOT_RECORDED);
     });
 
@@ -132,7 +132,7 @@ describe("rig ps resumeCommand and the node detail's recovery guidance", () => {
       record(withChoice(true));
       registry.mintOccupantTenure("node-codex", "handover");
       const { resumeCommand, guidance } = printed();
-      expect(resumeCommand).toBe("codex -s workspace-write resume 'sess-456'");
+      expect(resumeCommand).toBe("codex -s workspace-write --remote unix:// resume 'sess-456'");
       expect(guidance.notes).toContain(NOT_RECORDED);
     });
   });
@@ -141,15 +141,15 @@ describe("rig ps resumeCommand and the node detail's recovery guidance", () => {
     record(withChoice(true));
     const { resumeCommand, guidance } = printed();
     expect(resumeCommand).toBeNull();
-    expect(guidance.commands).toEqual(["cd /workspace/app", "codex --no-daemon -s workspace-write resume --last"]);
-    expect(guidance.summary).toContain("Try codex --no-daemon -s workspace-write resume --last;");
+    expect(guidance.commands).toEqual(["cd /workspace/app", "codex --no-daemon -s workspace-write --remote unix:// resume --last"]);
+    expect(guidance.summary).toContain("Try codex --no-daemon -s workspace-write --remote unix:// resume --last;");
     expect(guidance.notes).not.toContain(NOT_RECORDED);
   });
 
   it("without a stored conversation and an unrecorded choice, the picker command and summary are unchanged", () => {
     const { guidance } = printed();
-    expect(guidance.commands).toEqual(["cd /workspace/app", "codex -s workspace-write resume --last"]);
-    expect(guidance.summary).toContain("Try codex -s workspace-write resume --last;");
+    expect(guidance.commands).toEqual(["cd /workspace/app", "codex -s workspace-write --remote unix:// resume --last"]);
+    expect(guidance.summary).toContain("Try codex -s workspace-write --remote unix:// resume --last;");
     expect(guidance.notes).toContain(NOT_RECORDED);
   });
 });

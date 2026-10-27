@@ -392,13 +392,13 @@ describe("native resume probe", () => {
 
   it("builds a Codex no-profile resume with the explicit -s workspace-write floor flag", () => {
     expect(buildNativeResumeCommand("codex", "019d-token")).toBe(
-      "codex -s workspace-write resume '019d-token'"
+      "codex -s workspace-write --remote unix:// resume '019d-token'"
     );
   });
 
   it("builds a Codex profile resume with -p flag", () => {
     expect(buildNativeResumeCommand("codex", "019d-token", null, "my-profile")).toBe(
-      "codex -p 'my-profile' resume '019d-token'"
+      "codex -p 'my-profile' --remote unix:// resume '019d-token'"
     );
   });
 
@@ -410,37 +410,37 @@ describe("native resume probe", () => {
   describe("buildCodexResumeCore (shared builder)", () => {
     it("no-profile emits the explicit -s workspace-write floor flag matching fresh launch", () => {
       expect(buildCodexResumeCore("tok-123")).toBe(
-        "codex -s workspace-write resume 'tok-123'"
+        "codex -s workspace-write --remote unix:// resume 'tok-123'"
       );
     });
 
     it("profile emits -p flag, no posture flags", () => {
       expect(buildCodexResumeCore("tok-123", "dev-profile")).toBe(
-        "codex -p 'dev-profile' resume 'tok-123'"
+        "codex -p 'dev-profile' --remote unix:// resume 'tok-123'"
       );
     });
 
     it("useLast emits --last instead of token", () => {
       expect(buildCodexResumeCore("", null, true)).toBe(
-        "codex -s workspace-write resume --last"
+        "codex -s workspace-write --remote unix:// resume --last"
       );
     });
 
     it("profile + useLast emits -p + --last", () => {
       expect(buildCodexResumeCore("", "my-prof", true)).toBe(
-        "codex -p 'my-prof' resume --last"
+        "codex -p 'my-prof' --remote unix:// resume --last"
       );
     });
 
     it("0.5.2-07: a SPEC-pinned model emits -m before the resume subcommand (legacy restore carries the model)", () => {
       expect(buildCodexResumeCore("tok-123", null, false, undefined, undefined, "gpt-5.4-cheap")).toBe(
-        "codex -s workspace-write -m 'gpt-5.4-cheap' resume 'tok-123'"
+        "codex -s workspace-write -m 'gpt-5.4-cheap' --remote unix:// resume 'tok-123'"
       );
     });
 
     it("#75: reasoning effort emits -c model_reasoning_effort before the resume subcommand", () => {
       expect(buildCodexResumeCore("tok-123", null, false, undefined, undefined, "gpt-5.4-cheap", undefined, false, "high")).toBe(
-        "codex -s workspace-write -m 'gpt-5.4-cheap' -c 'model_reasoning_effort=\"high\"' resume 'tok-123'"
+        "codex -s workspace-write -m 'gpt-5.4-cheap' -c 'model_reasoning_effort=\"high\"' --remote unix:// resume 'tok-123'"
       );
     });
   });

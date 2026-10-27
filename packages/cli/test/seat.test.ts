@@ -1,9 +1,15 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Command } from "commander";
 import { DaemonClient } from "../src/client.js";
-import { seatCommand, handoverCommand } from "../src/commands/seat.js";
+import { seatCommand, handoverCommand, type SeatDeps } from "../src/commands/seat.js";
 import { STATE_FILE, type DaemonState, type LifecycleDeps } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
+import type { WorkInstallPlan } from "../src/lib/work-install.js";
+
+let goalFixtureRoot: string | undefined;
 
 function mockLifecycleDeps(): LifecycleDeps {
   return {
@@ -29,7 +35,8 @@ function makeDeps(
   response: { status: number; data: unknown },
   paths: string[],
   postBodies?: unknown[],
-): StatusDeps {
+  extra: Partial<Pick<SeatDeps, "workInstall" | "recordGoalOutcome">> = {},
+): SeatDeps {
   return {
     lifecycleDeps: mockLifecycleDeps(),
     clientFactory: () => ({
@@ -43,10 +50,11 @@ function makeDeps(
         return response;
       }),
     }) as unknown as StatusDeps["clientFactory"] extends (url: string) => infer T ? T : never,
+    ...extra,
   };
 }
 
-function makeCommand(deps: StatusDeps): Command {
+function makeCommand(deps: SeatDeps): Command {
   const program = new Command();
   program.exitOverride();
   program.addCommand(seatCommand(deps));
@@ -55,24 +63,93 @@ function makeCommand(deps: StatusDeps): Command {
 }
 
 describe("seat goal", () => {
-  it("sends status-only changes with explicit thread/socket and no objective replacement", async () => {
+  it("defaults the objective from the selected slice and lets the service resolve the verified target binding", async () => {
     const paths: string[] = [], bodies: unknown[] = [];
-    const deps = makeDeps({ status: 200, data: { ok: true } }, paths, bodies);
+    const work = makeGoalWork();
+    const recordGoalOutcome = vi.fn(() => ({ target: { ok: true as const, path: "/audit/slices/01-selected/PROGRESS.md", scope: "slice" as const, mission: "audit", slice: "01-selected" }, changed: true }));
+    const deps = makeDeps({ status: 200, data: { ok: true, threadId: "01a179a1-9ac1-7cf1-b249-4acf7d07868a", changed: true,
+      goal: { threadId: "01a179a1-9ac1-7cf1-b249-4acf7d07868a", objective: "Slice objective", status: "active" } } }, paths, bodies,
+    { workInstall: () => work, recordGoalOutcome });
     const output = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "goal", "set", "audit-lead@kernel",
-      "--thread", "exact-thread", "--socket", "/target/rpc.sock", "--status", "active", "--json"]).then(() => {}));
+      "--status", "active", "--json"]).then(() => {}));
     expect(output.exitCode).toBeUndefined();
     expect(paths).toEqual(["/api/seat/goal/audit-lead%40kernel"]);
-    expect(bodies).toEqual([{ operation: "set", threadId: "exact-thread", socketPath: "/target/rpc.sock", status: "active" }]);
+    expect(bodies).toEqual([{ operation: "set", status: "active", objective: "Slice objective", objectiveSource: {
+      altitude: "slice", specPath: realpathSync(join(goalFixtureRoot!, "missions/audit/slices/01-selected/SPEC.md")),
+      specAddress: "mission:slices/01-selected/SPEC.md", selectionSource: "explicit",
+    } }]);
+    expect(recordGoalOutcome).toHaveBeenCalledWith(work, expect.objectContaining({ operation: "set", seat: "audit-lead@kernel",
+      threadId: "01a179a1-9ac1-7cf1-b249-4acf7d07868a", changed: true, status: "active" }));
+    expect(output.logs.join("\n")).toContain('"progressTrail"');
   });
+
+  it("retains explicit exact thread and socket targets", async () => {
+    const paths: string[] = [], bodies: unknown[] = [];
+    const work = makeGoalWork();
+    const deps = makeDeps({ status: 200, data: { ok: true, threadId: "01a179a1-9ac1-7cf1-b249-4acf7d07868a", changed: true,
+      goal: { threadId: "01a179a1-9ac1-7cf1-b249-4acf7d07868a", objective: "Slice objective", status: "active" } } }, paths, bodies,
+    { workInstall: () => work, recordGoalOutcome: () => ({ target: { ok: true, path: "/audit/slices/01-selected/PROGRESS.md", scope: "slice", mission: "audit", slice: "01-selected" }, changed: true }) });
+    await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "goal", "set", "audit-lead@kernel",
+      "--thread", "01a179a1-9ac1-7cf1-b249-4acf7d07868a", "--socket", "/target/rpc.sock", "--status", "active", "--objective", "Slice objective"]).then(() => {}));
+    expect(bodies[0]).toMatchObject({ operation: "set", threadId: "01a179a1-9ac1-7cf1-b249-4acf7d07868a", socketPath: "/target/rpc.sock", status: "active", objective: "Slice objective" });
+  });
+
   it("preserves full multiline stdin objectives", async () => {
     const paths: string[] = [], bodies: unknown[] = [];
-    const deps = { ...makeDeps({ status: 200, data: { ok: true } }, paths, bodies), readStdin: async () => "full goal\nsecond line\n" };
+    const work = makeGoalWork();
+    const deps = { ...makeDeps({ status: 200, data: { ok: true, threadId: "01a179a1-9ac1-7cf1-b249-4acf7d07868a", changed: true,
+      goal: { threadId: "01a179a1-9ac1-7cf1-b249-4acf7d07868a", objective: "full goal\nsecond line\n", status: "paused" } } }, paths, bodies,
+      { workInstall: () => work, recordGoalOutcome: () => ({ target: { ok: true, path: "/audit/slices/01-selected/PROGRESS.md", scope: "slice", mission: "audit", slice: "01-selected" }, changed: true }) }),
+      readStdin: async () => "full goal\nsecond line\n" };
     const program = new Command(); program.addCommand(seatCommand(deps));
     await captureLogs(() => program.parseAsync(["node", "rig", "seat", "goal", "set", "audit-lead@kernel",
       "--thread", "exact-thread", "--socket", "/target/rpc.sock", "--status", "paused", "--objective-stdin"]).then(() => {}));
     expect(bodies[0]).toMatchObject({ objective: "full goal\nsecond line\n" });
   });
+
+  it("fails closed before the goal service when work-install has no selected scope", async () => {
+    const paths: string[] = [], bodies: unknown[] = [];
+    const deps = makeDeps({ status: 200, data: { ok: true } }, paths, bodies,
+      { workInstall: () => ({ error: { code: "goal_scope_missing", message: "No mission" } }) });
+    const output = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "goal", "set", "audit-lead@kernel", "--status", "active"]).then(() => {}));
+    expect(output.exitCode).toBe(1);
+    expect(paths).toEqual([]);
+    expect(bodies).toEqual([]);
+    expect(output.logs.join("\n")).toContain("goal_scope_missing");
+  });
 });
+
+afterEach(() => {
+  if (goalFixtureRoot) rmSync(goalFixtureRoot, { recursive: true, force: true });
+  goalFixtureRoot = undefined;
+});
+
+function makeGoalWork(): WorkInstallPlan {
+  goalFixtureRoot = mkdtempSync(join(tmpdir(), "openrig-seat-goal-cli-"));
+  const missionRoot = join(goalFixtureRoot, "missions", "audit");
+  const sliceRoot = join(missionRoot, "slices", "01-selected");
+  mkdirSync(sliceRoot, { recursive: true });
+  const missionSpec = join(missionRoot, "SPEC.md");
+  const missionProgress = join(missionRoot, "PROGRESS.md");
+  const sliceSpec = join(sliceRoot, "SPEC.md");
+  const sliceProgress = join(sliceRoot, "PROGRESS.md");
+  writeFileSync(missionSpec, "---\nintent: Mission objective\n---\n", "utf8");
+  writeFileSync(missionProgress, "# Mission\n", "utf8");
+  writeFileSync(sliceSpec, "---\nintent: Slice objective\n---\n", "utf8");
+  writeFileSync(sliceProgress, "# Slice\n", "utf8");
+  return {
+    position: { workspaceRoot: goalFixtureRoot, projectId: "app", projectRoot: goalFixtureRoot, selectedBy: "single",
+      missionRoot, sliceRoot, mission: "audit", slice: "01-selected", frontier: "slice" },
+    pieces: [
+      { altitude: "mission", address: "mission:SPEC.md", path: missionSpec, exists: true, source: "default" },
+      { altitude: "mission", address: "mission:PROGRESS.md", path: missionProgress, exists: true, source: "default" },
+      { altitude: "slice", address: "mission:slices/01-selected/SPEC.md", path: realpathSync(sliceSpec), exists: true, source: "explicit" },
+      { altitude: "slice", address: "mission:slices/01-selected/PROGRESS.md", path: sliceProgress, exists: true, source: "default" },
+    ],
+    systemWorld: { state: "default", source: "default", selection: "default", manifestPath: null, id: null, version: null, context: [], skills: [] },
+    skills: [], derive: [], warnings: [],
+  };
+}
 
 async function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; errors: string[]; exitCode: number | undefined }> {
   const logs: string[] = [];

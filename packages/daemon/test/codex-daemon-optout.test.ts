@@ -174,9 +174,9 @@ describe("#69 CodexResumeAdapter (legacy restore path)", () => {
 describe("#69 buildCodexResumeCore", () => {
   it("adds the opt-out only when asked; the default (display commands) is byte-identical", () => {
     const plain = buildCodexResumeCore("tok", null);
-    expect(plain).toBe("codex -s workspace-write resume 'tok'");
+    expect(plain).toBe("codex -s workspace-write --remote unix:// resume 'tok'");
     expect(buildCodexResumeCore("tok", null, false, undefined, undefined, undefined, undefined, true))
-      .toBe("codex --no-daemon -s workspace-write resume 'tok'");
+      .toBe("codex --no-daemon -s workspace-write --remote unix:// resume 'tok'");
   });
 });
 

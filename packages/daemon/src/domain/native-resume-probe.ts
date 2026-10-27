@@ -95,7 +95,7 @@ export function buildCodexResumeCore(
   const suffix = extraArgs ? ` ${extraArgs}` : "";
   const tokenArg = useLast ? "--last" : shellQuote(resumeToken);
   const daemonArg = daemonOptOut ? " --no-daemon" : "";
-  return `codex${daemonArg}${profileOrPosture}${modelArg}${effortArg} resume ${tokenArg}${suffix}`;
+  return `codex${daemonArg}${profileOrPosture}${modelArg}${effortArg} --remote unix:// resume ${tokenArg}${suffix}`;
 }
 
 export function assessNativeResumeProbe(
