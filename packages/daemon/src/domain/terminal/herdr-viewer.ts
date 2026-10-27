@@ -80,16 +80,15 @@ export class HerdrViewer {
     const listed = body(await this.run(["workspace", "list", "--json"]));
     if (!Array.isArray(listed.workspaces)) throw new Error("Viewer enumeration is unreadable.");
     const found: Pane[] = [];
-    let matchingWorkspaces = 0;
     for (const workspace of listed.workspaces as Array<Record<string, unknown>>) {
-      if (!workspace || typeof workspace.label !== "string" || typeof workspace.workspace_id !== "string") throw new Error("Viewer workspace enumeration is incomplete.");
-      if (workspace.label !== entry.label) continue;
-      if (++matchingWorkspaces > 1) throw new Error("Viewer workspace attribution is ambiguous.");
+      if (!workspace || typeof workspace.workspace_id !== "string" || !workspace.workspace_id) throw new Error("Viewer workspace enumeration is incomplete.");
+      // Labels are mutable. Only a complete endpoint-wide private-cwd scan
+      // can prove absence, including panes moved to another workspace.
       const listedPanes = body(await this.run(["pane", "list", "--workspace", workspace.workspace_id]));
       if (!Array.isArray(listedPanes.panes)) throw new Error("Viewer pane enumeration is unreadable.");
       for (const raw of listedPanes.panes) {
         const candidate = pane(raw);
-        if (!candidate) throw new Error("Viewer pane enumeration is incomplete.");
+        if (!candidate || candidate.workspace_id !== workspace.workspace_id) throw new Error("Viewer pane enumeration is incomplete.");
         if (candidate.cwd === entry.cwd) found.push(candidate);
       }
     }

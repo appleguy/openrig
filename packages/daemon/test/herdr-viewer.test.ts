@@ -21,6 +21,7 @@ function fixture() {
   let ids = { workspace_id: "w1", pane_id: "w1:p1", terminal_id: "term_001", cwd: "" };
   let label = "", running = false, uncertainCreate = false, uncertainRun = false, idless = false;
   let gone = false, enumerable = true, unreadable = false;
+  let workspaceInventory: unknown[] | undefined, paneInventory: Record<string, unknown> | undefined;
   const inspect = async () => ({ sessionId: "$1", nodeId: key.nodeId });
   const run: HerdrViewerRun = async args => {
     calls.push(args);
@@ -32,8 +33,8 @@ function fixture() {
       if (uncertainCreate) { uncertainCreate = false; throw new Error("lost response"); }
       return JSON.stringify({ result: { root_pane: idless ? {} : ids } });
     }
-    if (command === "workspace list") return JSON.stringify({ result: unreadable ? {} : { workspaces: enumerable ? [{ workspace_id: ids.workspace_id, label }] : [] } });
-    if (command === "pane list") return JSON.stringify({ result: { panes: [ids] } });
+    if (command === "workspace list") return JSON.stringify({ result: unreadable ? {} : { workspaces: workspaceInventory ?? (enumerable ? [{ workspace_id: ids.workspace_id, label }] : []) } });
+    if (command === "pane list") return JSON.stringify({ result: paneInventory ? paneInventory[args[args.indexOf("--workspace") + 1]!] : { panes: [ids] } });
     if (command === "pane get") { if (gone) throw new Error("pane not found"); return JSON.stringify({ result: { pane: ids } }); }
     if (command === "pane run") {
       running = true;
@@ -48,6 +49,7 @@ function fixture() {
   return { root, target, calls, viewer, ids,
     lose: (listed: boolean, malformed = false) => { gone = true; enumerable = listed; unreadable = malformed; },
     loseChanged: () => { gone = false; enumerable = false; },
+    setEnumeration: (workspaces: unknown[], panes: Record<string, unknown>) => { workspaceInventory = workspaces; paneInventory = panes; },
     setCreateLost: () => { uncertainCreate = true; }, setRunLost: () => { uncertainRun = true; }, setIdless: () => { idless = true; }, exit: () => { running = false; } };
 }
 
@@ -114,6 +116,29 @@ describe("owned Herdr viewer", () => {
     expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unconfirmed" });
     expect(existsSync(oldCwd)).toBe(true);
     expect(f.calls.filter(a => a[1] === "create")).toHaveLength(1);
+  });
+  it.each(["renamed", "moved", "partial"])("never retires a %s workspace viewer or creates a duplicate", async mode => {
+    const f = fixture(), v = f.viewer();
+    expect(await v.ensure(key, f.target)).toMatchObject({ ok: true });
+    const oldCwd = f.ids.cwd;
+    const journalPath = path.join(f.root, readdirSync(f.root).find(name => name.endsWith(".json"))!);
+    const entryId = JSON.stringify([key.hostId, key.nodeId]);
+    const saved = JSON.parse(readFileSync(journalPath, "utf8")).entries[entryId];
+    f.lose(true); // The old pane ID is gone, but endpoint absence is not proven.
+    if (mode === "renamed") {
+      f.setEnumeration([{ workspace_id: "w1", label: "renamed by the person" }], { w1: { panes: [f.ids] } });
+    } else {
+      f.ids.workspace_id = "w2"; f.ids.pane_id = "w2:p1";
+      f.setEnumeration([{ workspace_id: "w1", label: saved.label }, { workspace_id: "w2", label: "other workspace" }],
+        { w1: { panes: [] }, w2: mode === "partial" ? {} : { panes: [f.ids] } });
+    }
+    const first = await v.ensure(key, f.target), next = await f.viewer().ensure(key, f.target);
+    expect(first).toMatchObject({ ok: false, code: "viewer_unconfirmed" });
+    expect(next).toMatchObject({ ok: false, code: "viewer_unconfirmed" });
+    expect(f.calls.filter(a => a[1] === "create")).toHaveLength(1);
+    expect(existsSync(oldCwd)).toBe(true);
+    expect(JSON.parse(readFileSync(journalPath, "utf8")).entries[entryId]).toEqual(saved);
+    expect(f.calls.filter(a => a[0] === "pane" && a[1] === "list").some(a => a.includes(mode === "renamed" ? "w1" : "w2"))).toBe(true);
   });
   it("does not count a persistent shell after viewer exit as a working attachment", async () => {
     const f = fixture(), v = f.viewer(); await v.ensure(key, f.target); f.exit();
